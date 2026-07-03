@@ -293,9 +293,9 @@ namespace SuperSaiyan
             int coreHeight = 7 + Wave(_animationSeconds * 18f, 17, 2);
             int glowHeight = 24 + Wave(_animationSeconds * 13f, 23, 4);
 
-            DrawBeamLayer(startX, centerY, direction, length, glowHeight, new Color((byte)36, (byte)126, (byte)255, (byte)(70 * intensity)));
-            DrawBeamLayer(startX, centerY, direction, length, glowHeight / 2, new Color((byte)62, (byte)224, (byte)255, (byte)(115 * intensity)));
-            DrawBeamLayer(startX, centerY, direction, length, coreHeight, new Color((byte)246, (byte)255, (byte)255, (byte)(225 * intensity)));
+            DrawBeamLayer(startX, centerY, direction, length, glowHeight, new Color((byte)214, (byte)126, (byte)18, (byte)(78 * intensity)));
+            DrawBeamLayer(startX, centerY, direction, length, glowHeight / 2, new Color((byte)255, (byte)214, (byte)48, (byte)(132 * intensity)));
+            DrawBeamLayer(startX, centerY, direction, length, coreHeight, new Color((byte)255, (byte)255, (byte)206, (byte)(235 * intensity)));
 
             for (int i = 0; i < 15; i++)
             {
@@ -305,7 +305,7 @@ namespace SuperSaiyan
                 byte alpha = (byte)(80 + (i % 4) * 22);
                 Color color = i % 3 == 0
                     ? new Color((byte)255, (byte)255, (byte)255, alpha)
-                    : new Color((byte)70, (byte)230, (byte)255, alpha);
+                    : new Color((byte)255, (byte)214, (byte)42, alpha);
 
                 DrawBeamLine(startX, centerY + offset + jitter, direction, segmentLength, color);
             }
@@ -317,9 +317,9 @@ namespace SuperSaiyan
             int radius = 4 + (int)(chargeT * 7f) + Wave(_animationSeconds * 18f, 31, 1);
             byte alpha = (byte)(100 + chargeT * 120f);
 
-            DrawDiamond(startX, centerY, radius + 5, new Color((byte)30, (byte)110, (byte)255, (byte)(alpha * 0.34f)));
-            DrawDiamond(startX, centerY, radius + 2, new Color((byte)70, (byte)232, (byte)255, (byte)(alpha * 0.55f)));
-            DrawDiamond(startX, centerY, radius, new Color((byte)255, (byte)255, (byte)255, alpha));
+            DrawDiamond(startX, centerY, radius + 5, new Color((byte)210, (byte)112, (byte)10, (byte)(alpha * 0.34f)));
+            DrawDiamond(startX, centerY, radius + 2, new Color((byte)255, (byte)224, (byte)54, (byte)(alpha * 0.58f)));
+            DrawDiamond(startX, centerY, radius, new Color((byte)255, (byte)255, (byte)210, alpha));
         }
 
         private void DrawBeamLayer(int startX, int centerY, int direction, int length, int height, Color color)
