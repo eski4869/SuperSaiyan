@@ -23,7 +23,7 @@ namespace SuperSaiyan
     public sealed class SuperSaiyanAura : Entity, JumpKing.Util.IDrawable
     {
         private const float AuraDurationSeconds = 20f;
-        private const float KamehamehaDurationSeconds = 1.25f;
+        private const float KamehamehaDurationSeconds = 5f;
         private const float KamehamehaChargeSeconds = 0.22f;
         private const float StatePollIntervalSeconds = 1f;
         private const string AuraStateFilePath = @"C:\ChannelPoint\super_saiyan.state";
