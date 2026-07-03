@@ -23,8 +23,10 @@ namespace SuperSaiyan
     public sealed class SuperSaiyanAura : Entity, JumpKing.Util.IDrawable
     {
         private const float AuraDurationSeconds = 20f;
-        private const float KamehamehaDurationSeconds = 5f;
-        private const float KamehamehaChargeSeconds = 0.22f;
+        private const float KamehamehaChargeSeconds = 1f;
+        private const float KamehamehaBeamSeconds = 5f;
+        private const float KamehamehaDurationSeconds =
+            KamehamehaChargeSeconds + KamehamehaBeamSeconds;
         private const float StatePollIntervalSeconds = 1f;
         private const string AuraStateFilePath = @"C:\ChannelPoint\super_saiyan.state";
         private const string KamehamehaStateFilePath = @"C:\ChannelPoint\kamehameha.state";
@@ -276,7 +278,7 @@ namespace SuperSaiyan
         {
             float elapsed = KamehamehaDurationSeconds - _kamehamehaSeconds;
             int direction = _beamDirection < 0 ? -1 : 1;
-            int startX = direction > 0 ? hitbox.Right - 2 : hitbox.Left + 2;
+            int startX = direction > 0 ? hitbox.Right + 8 : hitbox.Left - 8;
             int centerY = hitbox.Center.Y + 1;
 
             DrawKamehamehaCharge(startX, centerY, elapsed);
@@ -317,9 +319,9 @@ namespace SuperSaiyan
             int radius = 4 + (int)(chargeT * 7f) + Wave(_animationSeconds * 18f, 31, 1);
             byte alpha = (byte)(100 + chargeT * 120f);
 
-            DrawDiamond(startX, centerY, radius + 5, new Color((byte)210, (byte)112, (byte)10, (byte)(alpha * 0.34f)));
-            DrawDiamond(startX, centerY, radius + 2, new Color((byte)255, (byte)224, (byte)54, (byte)(alpha * 0.58f)));
-            DrawDiamond(startX, centerY, radius, new Color((byte)255, (byte)255, (byte)210, alpha));
+            DrawOrb(startX, centerY, radius + 5, new Color((byte)210, (byte)112, (byte)10, (byte)(alpha * 0.34f)));
+            DrawOrb(startX, centerY, radius + 2, new Color((byte)255, (byte)224, (byte)54, (byte)(alpha * 0.58f)));
+            DrawOrb(startX, centerY, radius, new Color((byte)255, (byte)255, (byte)210, alpha));
         }
 
         private void DrawBeamLayer(int startX, int centerY, int direction, int length, int height, Color color)
@@ -335,11 +337,14 @@ namespace SuperSaiyan
             Game1.spriteBatch.Draw(_pixel, new Rectangle(x, y, length, 1), color);
         }
 
-        private void DrawDiamond(int centerX, int centerY, int radius, Color color)
+        private void DrawOrb(int centerX, int centerY, int radius, Color color)
         {
             for (int y = -radius; y <= radius; y++)
             {
-                int halfWidth = radius - Math.Abs(y);
+                float normalizedY = y / (float)radius;
+                int halfWidth = (int)Math.Round(
+                    Math.Sqrt(Math.Max(0f, 1f - normalizedY * normalizedY)) * radius
+                );
                 Game1.spriteBatch.Draw(
                     _pixel,
                     new Rectangle(centerX - halfWidth, centerY + y, halfWidth * 2 + 1, 1),
