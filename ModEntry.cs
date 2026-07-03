@@ -23,18 +23,25 @@ namespace SuperSaiyan
     public sealed class SuperSaiyanAura : Entity, JumpKing.Util.IDrawable
     {
         private const float AuraDurationSeconds = 20f;
+        private const float KamehamehaDurationSeconds = 1.25f;
+        private const float KamehamehaChargeSeconds = 0.22f;
         private const float StatePollIntervalSeconds = 1f;
-        private const string StateFilePath = @"C:\ChannelPoint\super_saiyan.state";
+        private const string AuraStateFilePath = @"C:\ChannelPoint\super_saiyan.state";
+        private const string KamehamehaStateFilePath = @"C:\ChannelPoint\kamehameha.state";
 
         private static SuperSaiyanAura _instance;
 
         private Texture2D[] _auraFrames;
         private Texture2D _pixel;
         private KeyboardState _previousKeyboardState;
-        private DateTime _lastStateWriteUtc = DateTime.MinValue;
+        private DateTime _lastAuraStateWriteUtc = DateTime.MinValue;
+        private DateTime _lastKamehamehaStateWriteUtc = DateTime.MinValue;
         private float _remainingSeconds;
+        private float _kamehamehaSeconds;
         private float _pollSeconds;
         private float _animationSeconds;
+        private int _lastHorizontalDirection = 1;
+        private int _beamDirection = 1;
 
         public static void EnsureAdded()
         {
@@ -55,7 +62,7 @@ namespace SuperSaiyan
         private SuperSaiyanAura()
         {
             _previousKeyboardState = Keyboard.GetState();
-            LoadStateTimestamp();
+            LoadStateTimestamps();
             CreateTextures();
         }
 
@@ -65,32 +72,54 @@ namespace SuperSaiyan
             _pollSeconds += delta;
 
             KeyboardState keyboardState = Keyboard.GetState();
+            TrackHorizontalDirection(keyboardState);
+
             bool shiftDown =
                 keyboardState.IsKeyDown(Keys.LeftShift) ||
                 keyboardState.IsKeyDown(Keys.RightShift);
 
             if (shiftDown && WasKeyPressed(keyboardState, Keys.S))
             {
-                Activate();
+                ActivateAura();
+            }
+
+            if (shiftDown && WasKeyPressed(keyboardState, Keys.C))
+            {
+                FireKamehameha();
             }
 
             _previousKeyboardState = keyboardState;
 
-            if (_remainingSeconds <= 0f && _pollSeconds >= StatePollIntervalSeconds)
+            if (_pollSeconds >= StatePollIntervalSeconds)
             {
                 _pollSeconds = 0f;
-                PollStateFile();
+
+                if (_remainingSeconds <= 0f)
+                {
+                    PollAuraStateFile();
+                }
+
+                if (_kamehamehaSeconds <= 0f)
+                {
+                    PollKamehamehaStateFile();
+                }
             }
 
             if (_remainingSeconds > 0f)
             {
                 _remainingSeconds = Math.Max(0f, _remainingSeconds - delta);
             }
+
+            if (_kamehamehaSeconds > 0f)
+            {
+                _kamehamehaSeconds = Math.Max(0f, _kamehamehaSeconds - delta);
+            }
         }
 
         public override void Draw()
         {
-            if (_remainingSeconds <= 0f || _pixel == null)
+            if ((_remainingSeconds <= 0f && _kamehamehaSeconds <= 0f) ||
+                _pixel == null)
             {
                 return;
             }
@@ -103,7 +132,16 @@ namespace SuperSaiyan
             }
 
             Rectangle hitbox = Camera.TransformRect(player.m_body.GetHitbox());
-            DrawEnergyAura(hitbox);
+
+            if (_remainingSeconds > 0f)
+            {
+                DrawEnergyAura(hitbox);
+            }
+
+            if (_kamehamehaSeconds > 0f)
+            {
+                DrawKamehameha(hitbox);
+            }
         }
 
         protected override void OnDestroy()
@@ -133,18 +171,30 @@ namespace SuperSaiyan
             }
         }
 
-        private void Activate()
+        private void ActivateAura()
         {
             _remainingSeconds = AuraDurationSeconds;
         }
 
-        private void LoadStateTimestamp()
+        private void FireKamehameha()
+        {
+            _beamDirection = _lastHorizontalDirection < 0 ? -1 : 1;
+            _kamehamehaSeconds = KamehamehaDurationSeconds;
+        }
+
+        private void LoadStateTimestamps()
+        {
+            LoadStateTimestamp(AuraStateFilePath, ref _lastAuraStateWriteUtc);
+            LoadStateTimestamp(KamehamehaStateFilePath, ref _lastKamehamehaStateWriteUtc);
+        }
+
+        private void LoadStateTimestamp(string path, ref DateTime lastWriteUtc)
         {
             try
             {
-                if (File.Exists(StateFilePath))
+                if (File.Exists(path))
                 {
-                    _lastStateWriteUtc = File.GetLastWriteTimeUtc(StateFilePath);
+                    lastWriteUtc = File.GetLastWriteTimeUtc(path);
                 }
             }
             catch
@@ -152,24 +202,34 @@ namespace SuperSaiyan
             }
         }
 
-        private void PollStateFile()
+        private void PollAuraStateFile()
+        {
+            PollStateFile(AuraStateFilePath, ref _lastAuraStateWriteUtc, ActivateAura);
+        }
+
+        private void PollKamehamehaStateFile()
+        {
+            PollStateFile(KamehamehaStateFilePath, ref _lastKamehamehaStateWriteUtc, FireKamehameha);
+        }
+
+        private void PollStateFile(string path, ref DateTime lastWriteUtc, Action activate)
         {
             try
             {
-                if (!File.Exists(StateFilePath))
+                if (!File.Exists(path))
                 {
                     return;
                 }
 
-                DateTime writeUtc = File.GetLastWriteTimeUtc(StateFilePath);
+                DateTime writeUtc = File.GetLastWriteTimeUtc(path);
 
-                if (writeUtc <= _lastStateWriteUtc)
+                if (writeUtc <= lastWriteUtc)
                 {
                     return;
                 }
 
-                _lastStateWriteUtc = writeUtc;
-                Activate();
+                lastWriteUtc = writeUtc;
+                activate();
             }
             catch
             {
@@ -209,6 +269,95 @@ namespace SuperSaiyan
             for (int i = 0; i < 36; i++)
             {
                 DrawOuterSpark(hitbox, i);
+            }
+        }
+
+        private void DrawKamehameha(Rectangle hitbox)
+        {
+            float elapsed = KamehamehaDurationSeconds - _kamehamehaSeconds;
+            int direction = _beamDirection < 0 ? -1 : 1;
+            int startX = direction > 0 ? hitbox.Right - 2 : hitbox.Left + 2;
+            int centerY = hitbox.Center.Y + 1;
+
+            DrawKamehamehaCharge(startX, centerY, elapsed);
+
+            if (elapsed < KamehamehaChargeSeconds)
+            {
+                return;
+            }
+
+            float fireT = Clamp01((elapsed - KamehamehaChargeSeconds) / 0.16f);
+            float fadeT = Clamp01(_kamehamehaSeconds / 0.20f);
+            float intensity = Math.Min(fireT, Math.Max(0.35f, fadeT));
+            int length = (int)(260f + intensity * 220f);
+            int coreHeight = 7 + Wave(_animationSeconds * 18f, 17, 2);
+            int glowHeight = 24 + Wave(_animationSeconds * 13f, 23, 4);
+
+            DrawBeamLayer(startX, centerY, direction, length, glowHeight, new Color((byte)36, (byte)126, (byte)255, (byte)(70 * intensity)));
+            DrawBeamLayer(startX, centerY, direction, length, glowHeight / 2, new Color((byte)62, (byte)224, (byte)255, (byte)(115 * intensity)));
+            DrawBeamLayer(startX, centerY, direction, length, coreHeight, new Color((byte)246, (byte)255, (byte)255, (byte)(225 * intensity)));
+
+            for (int i = 0; i < 15; i++)
+            {
+                int offset = -glowHeight / 2 + (i * glowHeight) / 14;
+                int jitter = Wave(_animationSeconds * (16f + i), i * 19, 5);
+                int segmentLength = length - (i % 5) * 18 + Wave(_animationSeconds * 22f, i * 7, 14);
+                byte alpha = (byte)(80 + (i % 4) * 22);
+                Color color = i % 3 == 0
+                    ? new Color((byte)255, (byte)255, (byte)255, alpha)
+                    : new Color((byte)70, (byte)230, (byte)255, alpha);
+
+                DrawBeamLine(startX, centerY + offset + jitter, direction, segmentLength, color);
+            }
+        }
+
+        private void DrawKamehamehaCharge(int startX, int centerY, float elapsed)
+        {
+            float chargeT = Clamp01(elapsed / KamehamehaChargeSeconds);
+            int radius = 4 + (int)(chargeT * 7f) + Wave(_animationSeconds * 18f, 31, 1);
+            byte alpha = (byte)(100 + chargeT * 120f);
+
+            DrawDiamond(startX, centerY, radius + 5, new Color((byte)30, (byte)110, (byte)255, (byte)(alpha * 0.34f)));
+            DrawDiamond(startX, centerY, radius + 2, new Color((byte)70, (byte)232, (byte)255, (byte)(alpha * 0.55f)));
+            DrawDiamond(startX, centerY, radius, new Color((byte)255, (byte)255, (byte)255, alpha));
+        }
+
+        private void DrawBeamLayer(int startX, int centerY, int direction, int length, int height, Color color)
+        {
+            int y = centerY - height / 2;
+            int x = direction > 0 ? startX : startX - length;
+            Game1.spriteBatch.Draw(_pixel, new Rectangle(x, y, length, height), color);
+        }
+
+        private void DrawBeamLine(int startX, int y, int direction, int length, Color color)
+        {
+            int x = direction > 0 ? startX : startX - length;
+            Game1.spriteBatch.Draw(_pixel, new Rectangle(x, y, length, 1), color);
+        }
+
+        private void DrawDiamond(int centerX, int centerY, int radius, Color color)
+        {
+            for (int y = -radius; y <= radius; y++)
+            {
+                int halfWidth = radius - Math.Abs(y);
+                Game1.spriteBatch.Draw(
+                    _pixel,
+                    new Rectangle(centerX - halfWidth, centerY + y, halfWidth * 2 + 1, 1),
+                    color
+                );
+            }
+        }
+
+        private void TrackHorizontalDirection(KeyboardState keyboardState)
+        {
+            if (keyboardState.IsKeyDown(Keys.Left) || keyboardState.IsKeyDown(Keys.J))
+            {
+                _lastHorizontalDirection = -1;
+            }
+
+            if (keyboardState.IsKeyDown(Keys.Right) || keyboardState.IsKeyDown(Keys.K))
+            {
+                _lastHorizontalDirection = 1;
             }
         }
 
@@ -475,37 +624,3 @@ namespace SuperSaiyan
         }
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
