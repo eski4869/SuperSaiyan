@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Reflection;
 using EntityComponent;
 using JumpKing;
 using JumpKing.Mods;
@@ -32,6 +33,10 @@ namespace SuperSaiyan
         private const string KamehamehaStateFilePath = @"C:\ChannelPoint\kamehameha.state";
 
         private static SuperSaiyanAura _instance;
+        private static readonly FieldInfo PlayerFlipField = typeof(PlayerEntity).GetField(
+            "m_flip",
+            BindingFlags.Instance | BindingFlags.NonPublic
+        );
 
         private Texture2D[] _auraFrames;
         private Texture2D _pixel;
@@ -43,7 +48,6 @@ namespace SuperSaiyan
         private float _pollSeconds;
         private float _animationSeconds;
         private int _lastHorizontalDirection = 1;
-        private int _beamDirection = 1;
 
         public static void EnsureAdded()
         {
@@ -142,7 +146,7 @@ namespace SuperSaiyan
 
             if (_kamehamehaSeconds > 0f)
             {
-                DrawKamehameha(hitbox);
+                DrawKamehameha(player, hitbox);
             }
         }
 
@@ -180,7 +184,6 @@ namespace SuperSaiyan
 
         private void FireKamehameha()
         {
-            _beamDirection = _lastHorizontalDirection < 0 ? -1 : 1;
             _kamehamehaSeconds = KamehamehaDurationSeconds;
         }
 
@@ -274,10 +277,10 @@ namespace SuperSaiyan
             }
         }
 
-        private void DrawKamehameha(Rectangle hitbox)
+        private void DrawKamehameha(PlayerEntity player, Rectangle hitbox)
         {
             float elapsed = KamehamehaDurationSeconds - _kamehamehaSeconds;
-            int direction = _beamDirection < 0 ? -1 : 1;
+            int direction = GetPlayerDirection(player);
             int startX = direction > 0 ? hitbox.Right + 8 : hitbox.Left - 8;
             int centerY = hitbox.Center.Y + 1;
 
@@ -311,6 +314,20 @@ namespace SuperSaiyan
 
                 DrawBeamLine(startX, centerY + offset + jitter, direction, segmentLength, color);
             }
+        }
+
+        private int GetPlayerDirection(PlayerEntity player)
+        {
+            if (PlayerFlipField != null)
+            {
+                object value = PlayerFlipField.GetValue(player);
+                if (value is SpriteEffects effects)
+                {
+                    return (effects & SpriteEffects.FlipHorizontally) != 0 ? -1 : 1;
+                }
+            }
+
+            return _lastHorizontalDirection < 0 ? -1 : 1;
         }
 
         private void DrawKamehamehaCharge(int startX, int centerY, float elapsed)
