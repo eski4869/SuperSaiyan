@@ -1,5 +1,4 @@
-﻿using System;
-using System.IO;
+using System;
 using System.Reflection;
 using EntityComponent;
 using JumpKing;
@@ -28,9 +27,10 @@ namespace SuperSaiyan
         private const float KamehamehaBeamSeconds = 5f;
         private const float KamehamehaDurationSeconds =
             KamehamehaChargeSeconds + KamehamehaBeamSeconds;
-        private const float StatePollIntervalSeconds = 1f;
-        private const string AuraStateFilePath = @"C:\ChannelPoint\super_saiyan.state";
-        private const string KamehamehaStateFilePath = @"C:\ChannelPoint\kamehameha.state";
+        private const string CommandTarget = "super_saiyan";
+        private const string ActivateCommand = "activate";
+        private const string KamehamehaCommand = "kamehameha";
+        private const string DeactivateCommand = "deactivate";
 
         private static SuperSaiyanAura _instance;
         private static readonly FieldInfo PlayerFlipField = typeof(PlayerEntity).GetField(
@@ -41,11 +41,8 @@ namespace SuperSaiyan
         private Texture2D[] _auraFrames;
         private Texture2D _pixel;
         private KeyboardState _previousKeyboardState;
-        private DateTime _lastAuraStateWriteUtc = DateTime.MinValue;
-        private DateTime _lastKamehamehaStateWriteUtc = DateTime.MinValue;
         private float _remainingSeconds;
         private float _kamehamehaSeconds;
-        private float _pollSeconds;
         private float _animationSeconds;
         private int _lastHorizontalDirection = 1;
 
@@ -68,17 +65,17 @@ namespace SuperSaiyan
         private SuperSaiyanAura()
         {
             _previousKeyboardState = Keyboard.GetState();
-            LoadStateTimestamps();
+            BrokerCommandClient.Register(CommandTarget);
             CreateTextures();
         }
 
         protected override void Update(float delta)
         {
             _animationSeconds += delta;
-            _pollSeconds += delta;
 
             KeyboardState keyboardState = Keyboard.GetState();
             TrackHorizontalDirection(keyboardState);
+            ProcessBrokerCommands();
 
             bool shiftDown =
                 keyboardState.IsKeyDown(Keys.LeftShift) ||
@@ -96,20 +93,7 @@ namespace SuperSaiyan
 
             _previousKeyboardState = keyboardState;
 
-            if (_pollSeconds >= StatePollIntervalSeconds)
-            {
-                _pollSeconds = 0f;
 
-                if (_remainingSeconds <= 0f)
-                {
-                    PollAuraStateFile();
-                }
-
-                if (_kamehamehaSeconds <= 0f)
-                {
-                    PollKamehamehaStateFile();
-                }
-            }
 
             if (_remainingSeconds > 0f)
             {
@@ -187,57 +171,30 @@ namespace SuperSaiyan
             _kamehamehaSeconds = KamehamehaDurationSeconds;
         }
 
-        private void LoadStateTimestamps()
+        private void ProcessBrokerCommands()
         {
-            LoadStateTimestamp(AuraStateFilePath, ref _lastAuraStateWriteUtc);
-            LoadStateTimestamp(KamehamehaStateFilePath, ref _lastKamehamehaStateWriteUtc);
-        }
+            BrokerCommandClient.Register(CommandTarget);
 
-        private void LoadStateTimestamp(string path, ref DateTime lastWriteUtc)
-        {
-            try
+            string command;
+            while (BrokerCommandClient.TryDequeue(CommandTarget, out command))
             {
-                if (File.Exists(path))
+                if (string.Equals(command, ActivateCommand, StringComparison.OrdinalIgnoreCase))
                 {
-                    lastWriteUtc = File.GetLastWriteTimeUtc(path);
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        private void PollAuraStateFile()
-        {
-            PollStateFile(AuraStateFilePath, ref _lastAuraStateWriteUtc, ActivateAura);
-        }
-
-        private void PollKamehamehaStateFile()
-        {
-            PollStateFile(KamehamehaStateFilePath, ref _lastKamehamehaStateWriteUtc, FireKamehameha);
-        }
-
-        private void PollStateFile(string path, ref DateTime lastWriteUtc, Action activate)
-        {
-            try
-            {
-                if (!File.Exists(path))
-                {
-                    return;
+                    ActivateAura();
+                    continue;
                 }
 
-                DateTime writeUtc = File.GetLastWriteTimeUtc(path);
-
-                if (writeUtc <= lastWriteUtc)
+                if (string.Equals(command, KamehamehaCommand, StringComparison.OrdinalIgnoreCase))
                 {
-                    return;
+                    FireKamehameha();
+                    continue;
                 }
 
-                lastWriteUtc = writeUtc;
-                activate();
-            }
-            catch
-            {
+                if (string.Equals(command, DeactivateCommand, StringComparison.OrdinalIgnoreCase))
+                {
+                    _remainingSeconds = 0f;
+                    _kamehamehaSeconds = 0f;
+                }
             }
         }
 
@@ -301,6 +258,7 @@ namespace SuperSaiyan
             DrawBeamLayer(startX, centerY, direction, length, glowHeight, new Color((byte)214, (byte)126, (byte)18, (byte)(78 * intensity)));
             DrawBeamLayer(startX, centerY, direction, length, glowHeight / 2, new Color((byte)255, (byte)214, (byte)48, (byte)(132 * intensity)));
             DrawBeamLayer(startX, centerY, direction, length, coreHeight, new Color((byte)255, (byte)255, (byte)206, (byte)(235 * intensity)));
+            DrawKamehamehaDamage(startX, centerY, direction, length, glowHeight, intensity);
 
             for (int i = 0; i < 15; i++)
             {
@@ -313,6 +271,100 @@ namespace SuperSaiyan
                     : new Color((byte)255, (byte)214, (byte)42, alpha);
 
                 DrawBeamLine(startX, centerY + offset + jitter, direction, segmentLength, color);
+            }
+        }
+
+        private void DrawKamehamehaDamage(
+            int startX,
+            int centerY,
+            int direction,
+            int length,
+            int beamHeight,
+            float intensity
+        )
+        {
+            int left = direction > 0 ? startX : startX - length;
+            int top = centerY - beamHeight / 2;
+            int bottom = centerY + beamHeight / 2;
+            int alpha = (int)(120 * intensity);
+
+            for (int i = 0; i < 28; i++)
+            {
+                int along = 10 + (i * 37 + Wave(_animationSeconds * 23f, i * 11, 9)) % Math.Max(1, length - 20);
+                int x = direction > 0 ? startX + along : startX - along;
+                int side = i % 2 == 0 ? -1 : 1;
+                int edgeY = side < 0 ? top : bottom;
+                int y = edgeY + side * (2 + (i * 5) % 13);
+                int width = 5 + (i % 5) * 3;
+                int height = 1 + (i % 3);
+                byte smokeAlpha = (byte)Math.Max(24, alpha - (i % 4) * 16);
+                Color smoke = new Color((byte)18, (byte)13, (byte)8, smokeAlpha);
+
+                Game1.spriteBatch.Draw(
+                    _pixel,
+                    new Rectangle(x - width / 2, y, width, height),
+                    smoke
+                );
+            }
+
+            for (int i = 0; i < 18; i++)
+            {
+                int along = 16 + (i * 53 + Wave(_animationSeconds * 19f, i * 17, 12)) % Math.Max(1, length - 32);
+                int x = direction > 0 ? startX + along : startX - along;
+                int y = centerY - beamHeight / 2 + (i * 11 + Wave(_animationSeconds * 21f, i * 13, 5)) % Math.Max(1, beamHeight);
+                int shardLength = 4 + (i % 4) * 3;
+                int shardDirection = direction * (i % 2 == 0 ? 1 : -1);
+                Color dark = new Color((byte)42, (byte)28, (byte)14, (byte)(95 * intensity));
+                Color bright = new Color((byte)255, (byte)199, (byte)42, (byte)(120 * intensity));
+
+                DrawDebrisLine(x, y, x + shardDirection * shardLength, y - 2 - (i % 5), dark);
+
+                if (i % 3 == 0)
+                {
+                    DrawDebrisLine(x, y, x + direction * (shardLength + 3), y + 1, bright);
+                }
+            }
+
+            for (int i = 0; i < 12; i++)
+            {
+                int along = 20 + (i * 71) % Math.Max(1, length - 40);
+                int x = direction > 0 ? left + along : left + length - along;
+                int y = centerY + Wave(_animationSeconds * 15f, i * 9, beamHeight / 2 + 8);
+                int size = 2 + i % 3;
+                Color ember = new Color((byte)255, (byte)104, (byte)18, (byte)(95 * intensity));
+                Game1.spriteBatch.Draw(_pixel, new Rectangle(x, y, size, size), ember);
+            }
+        }
+
+        private void DrawDebrisLine(int x0, int y0, int x1, int y1, Color color)
+        {
+            int dx = Math.Abs(x1 - x0);
+            int sx = x0 < x1 ? 1 : -1;
+            int dy = -Math.Abs(y1 - y0);
+            int sy = y0 < y1 ? 1 : -1;
+            int err = dx + dy;
+
+            while (true)
+            {
+                Game1.spriteBatch.Draw(_pixel, new Rectangle(x0, y0, 1, 1), color);
+
+                if (x0 == x1 && y0 == y1)
+                {
+                    break;
+                }
+
+                int e2 = err * 2;
+                if (e2 >= dy)
+                {
+                    err += dy;
+                    x0 += sx;
+                }
+
+                if (e2 <= dx)
+                {
+                    err += dx;
+                    y0 += sy;
+                }
             }
         }
 
@@ -643,6 +695,131 @@ namespace SuperSaiyan
         {
             return keyboardState.IsKeyDown(key) &&
                 !_previousKeyboardState.IsKeyDown(key);
+        }
+    }
+    internal static class BrokerCommandClient
+    {
+        private const string RegistryTypeName = "JumpKingHttpCommandBroker.CommandQueueRegistry";
+
+        private static object _registry;
+        private static MethodInfo _registerMethod;
+        private static MethodInfo _tryDequeueMethod;
+        private static DateTime _nextResolveUtc = DateTime.MinValue;
+        private static bool _loggedMissingBroker;
+        private static bool _registered;
+
+        public static void Register(string target)
+        {
+            if (_registered)
+            {
+                return;
+            }
+
+            if (!Resolve())
+            {
+                return;
+            }
+
+            try
+            {
+                _registerMethod.Invoke(_registry, new object[] { target });
+                _registered = true;
+            }
+            catch (Exception ex)
+            {
+                JumpKing.Program.crashLog.AddErrorMessage(
+                    "SuperSaiyan broker register failed: " + ex.Message
+                );
+            }
+        }
+
+        public static bool TryDequeue(string target, out string command)
+        {
+            command = null;
+
+            if (!_registered)
+            {
+                Register(target);
+            }
+
+            if (!_registered || !Resolve())
+            {
+                return false;
+            }
+
+            try
+            {
+                object[] args = new object[] { target, null };
+                bool dequeued = (bool)_tryDequeueMethod.Invoke(_registry, args);
+                command = args[1] as string;
+                return dequeued;
+            }
+            catch (Exception ex)
+            {
+                JumpKing.Program.crashLog.AddErrorMessage(
+                    "SuperSaiyan broker dequeue failed: " + ex.Message
+                );
+                return false;
+            }
+        }
+
+        private static bool Resolve()
+        {
+            if (_registry != null)
+            {
+                return true;
+            }
+
+            DateTime nowUtc = DateTime.UtcNow;
+            if (nowUtc < _nextResolveUtc)
+            {
+                return false;
+            }
+
+            _nextResolveUtc = nowUtc.AddSeconds(1);
+
+            Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            for (int i = 0; i < assemblies.Length; i++)
+            {
+                Type registryType = assemblies[i].GetType(RegistryTypeName, false);
+                if (registryType == null)
+                {
+                    continue;
+                }
+
+                FieldInfo instanceField = registryType.GetField(
+                    "Instance",
+                    BindingFlags.Public | BindingFlags.Static
+                );
+                MethodInfo registerMethod = registryType.GetMethod(
+                    "Register",
+                    new Type[] { typeof(string) }
+                );
+                MethodInfo tryDequeueMethod = registryType.GetMethod(
+                    "TryDequeue",
+                    new Type[] { typeof(string), typeof(string).MakeByRefType() }
+                );
+
+                if (instanceField == null || registerMethod == null || tryDequeueMethod == null)
+                {
+                    continue;
+                }
+
+                _registry = instanceField.GetValue(null);
+                _registerMethod = registerMethod;
+                _tryDequeueMethod = tryDequeueMethod;
+                return _registry != null;
+            }
+
+            if (!_loggedMissingBroker)
+            {
+                _loggedMissingBroker = true;
+                JumpKing.Program.crashLog.AddErrorMessage(
+                    "SuperSaiyan: JumpKingHttpCommandBroker is not loaded."
+                );
+            }
+
+            return false;
         }
     }
 }
