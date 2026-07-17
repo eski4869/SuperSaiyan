@@ -13,9 +13,16 @@ namespace SuperSaiyan
     [JumpKingMod("eski4869.SuperSaiyan")]
     public static class ModEntry
     {
+        [BeforeLevelLoad]
+        public static void BeforeLevelLoad()
+        {
+            SuperSaiyanAura.RegisterCommandTarget();
+        }
+
         [OnLevelStart]
         public static void OnLevelStart()
         {
+            SuperSaiyanAura.RegisterCommandTarget();
             SuperSaiyanAura.EnsureAdded();
         }
     }
@@ -45,6 +52,11 @@ namespace SuperSaiyan
         private float _kamehamehaSeconds;
         private float _animationSeconds;
         private int _lastHorizontalDirection = 1;
+
+        public static void RegisterCommandTarget()
+        {
+            BrokerCommandClient.Register(CommandTarget);
+        }
 
         public static void EnsureAdded()
         {
