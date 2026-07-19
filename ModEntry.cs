@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using EntityComponent;
 using JumpKing;
+using JumpKing.Level;
 using JumpKing.Mods;
 using JumpKing.Player;
 using Microsoft.Xna.Framework;
@@ -34,6 +36,8 @@ namespace SuperSaiyan
         private const float KamehamehaBeamSeconds = 5f;
         private const float KamehamehaDurationSeconds =
             KamehamehaChargeSeconds + KamehamehaBeamSeconds;
+        private const int KamehamehaMaximumLength = 480;
+        private const int KamehamehaCollisionHeight = 40;
         private const string CommandTarget = "super_saiyan";
         private const string ActivateCommand = "activate";
         private const string KamehamehaCommand = "kamehameha";
@@ -51,7 +55,12 @@ namespace SuperSaiyan
         private float _remainingSeconds;
         private float _kamehamehaSeconds;
         private float _animationSeconds;
+        private int _damageSeed;
+        private int _damageScreenIndex = -1;
+        private Point? _lastRightDamageOrigin;
+        private Point? _lastLeftDamageOrigin;
         private int _lastHorizontalDirection = 1;
+        private readonly List<DamageMark> _damageMarks = new List<DamageMark>();
 
         public static void RegisterCommandTarget()
         {
@@ -84,6 +93,7 @@ namespace SuperSaiyan
         protected override void Update(float delta)
         {
             _animationSeconds += delta;
+            UpdateDamageScreen();
 
             KeyboardState keyboardState = Keyboard.GetState();
             TrackHorizontalDirection(keyboardState);
@@ -114,21 +124,35 @@ namespace SuperSaiyan
 
             if (_kamehamehaSeconds > 0f)
             {
+                CaptureKamehamehaDamage();
                 _kamehamehaSeconds = Math.Max(0f, _kamehamehaSeconds - delta);
             }
         }
 
         public override void Draw()
         {
-            if ((_remainingSeconds <= 0f && _kamehamehaSeconds <= 0f) ||
+            if ((_remainingSeconds <= 0f &&
+                 _kamehamehaSeconds <= 0f &&
+                 _damageMarks.Count == 0) ||
                 _pixel == null)
             {
                 return;
             }
 
-            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            if (Game1.instance == null)
+            {
+                return;
+            }
 
-            if (player == null || Game1.instance == null)
+            DrawPersistentDamage();
+
+            if (_remainingSeconds <= 0f && _kamehamehaSeconds <= 0f)
+            {
+                return;
+            }
+
+            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            if (player == null)
             {
                 return;
             }
@@ -181,6 +205,9 @@ namespace SuperSaiyan
         private void FireKamehameha()
         {
             _kamehamehaSeconds = KamehamehaDurationSeconds;
+            _damageSeed = (_damageSeed + 1) % 997;
+            _lastRightDamageOrigin = null;
+            _lastLeftDamageOrigin = null;
         }
 
         private void ProcessBrokerCommands()
@@ -270,7 +297,6 @@ namespace SuperSaiyan
             DrawBeamLayer(startX, centerY, direction, length, glowHeight, new Color((byte)214, (byte)126, (byte)18, (byte)(78 * intensity)));
             DrawBeamLayer(startX, centerY, direction, length, glowHeight / 2, new Color((byte)255, (byte)214, (byte)48, (byte)(132 * intensity)));
             DrawBeamLayer(startX, centerY, direction, length, coreHeight, new Color((byte)255, (byte)255, (byte)206, (byte)(235 * intensity)));
-            DrawKamehamehaDamage(startX, centerY, direction, length, glowHeight, intensity);
 
             for (int i = 0; i < 15; i++)
             {
@@ -284,67 +310,338 @@ namespace SuperSaiyan
 
                 DrawBeamLine(startX, centerY + offset + jitter, direction, segmentLength, color);
             }
+
+            DrawImpactDebris(direction, intensity);
         }
 
-        private void DrawKamehamehaDamage(
-            int startX,
-            int centerY,
-            int direction,
-            int length,
-            int beamHeight,
-            float intensity
-        )
+        private void UpdateDamageScreen()
         {
-            int left = direction > 0 ? startX : startX - length;
-            int top = centerY - beamHeight / 2;
-            int bottom = centerY + beamHeight / 2;
-            int alpha = (int)(120 * intensity);
+            LevelScreen screen = LevelManager.CurrentScreen;
+            int screenIndex = screen == null ? -1 : screen.GetIndex0();
 
-            for (int i = 0; i < 28; i++)
+            if (screenIndex == _damageScreenIndex)
             {
-                int along = 10 + (i * 37 + Wave(_animationSeconds * 23f, i * 11, 9)) % Math.Max(1, length - 20);
-                int x = direction > 0 ? startX + along : startX - along;
-                int side = i % 2 == 0 ? -1 : 1;
-                int edgeY = side < 0 ? top : bottom;
-                int y = edgeY + side * (2 + (i * 5) % 13);
-                int width = 5 + (i % 5) * 3;
-                int height = 1 + (i % 3);
-                byte smokeAlpha = (byte)Math.Max(24, alpha - (i % 4) * 16);
-                Color smoke = new Color((byte)18, (byte)13, (byte)8, smokeAlpha);
-
-                Game1.spriteBatch.Draw(
-                    _pixel,
-                    new Rectangle(x - width / 2, y, width, height),
-                    smoke
-                );
+                return;
             }
 
-            for (int i = 0; i < 18; i++)
+            _damageScreenIndex = screenIndex;
+            _damageMarks.Clear();
+            _lastRightDamageOrigin = null;
+            _lastLeftDamageOrigin = null;
+        }
+
+        private void CaptureKamehamehaDamage()
+        {
+            float elapsed = KamehamehaDurationSeconds - _kamehamehaSeconds;
+            if (elapsed < KamehamehaChargeSeconds)
             {
-                int along = 16 + (i * 53 + Wave(_animationSeconds * 19f, i * 17, 12)) % Math.Max(1, length - 32);
-                int x = direction > 0 ? startX + along : startX - along;
-                int y = centerY - beamHeight / 2 + (i * 11 + Wave(_animationSeconds * 21f, i * 13, 5)) % Math.Max(1, beamHeight);
-                int shardLength = 4 + (i % 4) * 3;
-                int shardDirection = direction * (i % 2 == 0 ? 1 : -1);
-                Color dark = new Color((byte)42, (byte)28, (byte)14, (byte)(95 * intensity));
-                Color bright = new Color((byte)255, (byte)199, (byte)42, (byte)(120 * intensity));
+                return;
+            }
 
-                DrawDebrisLine(x, y, x + shardDirection * shardLength, y - 2 - (i % 5), dark);
+            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            LevelScreen screen = LevelManager.CurrentScreen;
+            if (screen == null || player == null)
+            {
+                return;
+            }
 
-                if (i % 3 == 0)
+            Rectangle playerHitbox = player.m_body.GetHitbox();
+            int direction = GetPlayerDirection(player);
+            int startX = direction > 0 ? playerHitbox.Right + 8 : playerHitbox.Left - 8;
+            int centerY = playerHitbox.Center.Y + 1;
+            Point origin = new Point(startX, centerY);
+            Point? previousOrigin = direction > 0
+                ? _lastRightDamageOrigin
+                : _lastLeftDamageOrigin;
+
+            if (previousOrigin.HasValue &&
+                Math.Abs(previousOrigin.Value.X - origin.X) < 12 &&
+                Math.Abs(previousOrigin.Value.Y - origin.Y) < 6)
+            {
+                return;
+            }
+
+            if (direction > 0)
+            {
+                _lastRightDamageOrigin = origin;
+            }
+            else
+            {
+                _lastLeftDamageOrigin = origin;
+            }
+
+            int queryX = direction > 0 ? startX : startX - KamehamehaMaximumLength;
+            Rectangle query = new Rectangle(
+                queryX,
+                centerY - KamehamehaCollisionHeight / 2,
+                KamehamehaMaximumLength,
+                KamehamehaCollisionHeight
+            );
+
+            if (query.Width <= 0 || query.Height <= 0)
+            {
+                return;
+            }
+
+            AdvCollisionInfo collisionInfo = LevelManager.GetCollisionInfo(query);
+            IReadOnlyList<IBlock> blocks = collisionInfo.GetCollidedBlocks();
+
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                Rectangle overlap;
+                if (blocks[i].Intersects(query, out overlap) !=
+                    BlockCollisionType.Collision_Blocking)
                 {
-                    DrawDebrisLine(x, y, x + direction * (shardLength + 3), y + 1, bright);
+                    continue;
+                }
+
+                Rectangle damageRect = Rectangle.Intersect(overlap, query);
+                if (damageRect.Width > 0 && damageRect.Height > 0)
+                {
+                    AddDamageMark(damageRect, direction, _damageSeed);
+                }
+            }
+        }
+
+        private void AddDamageMark(Rectangle worldRect, int direction, int seed)
+        {
+            for (int i = 0; i < _damageMarks.Count; i++)
+            {
+                DamageMark existing = _damageMarks[i];
+                if (existing.Direction == direction &&
+                    existing.WorldRect.Intersects(worldRect))
+                {
+                    int left = Math.Min(existing.WorldRect.Left, worldRect.Left);
+                    int top = Math.Min(existing.WorldRect.Top, worldRect.Top);
+                    int right = Math.Max(existing.WorldRect.Right, worldRect.Right);
+                    int bottom = Math.Max(existing.WorldRect.Bottom, worldRect.Bottom);
+                    Rectangle combined = new Rectangle(
+                        left,
+                        top,
+                        right - left,
+                        bottom - top
+                    );
+                    _damageMarks[i] = new DamageMark(
+                        combined,
+                        direction,
+                        existing.Seed
+                    );
+                    return;
                 }
             }
 
-            for (int i = 0; i < 12; i++)
+            int markSeed = unchecked(
+                seed ^
+                worldRect.X * 73856093 ^
+                worldRect.Y * 19349663 ^
+                worldRect.Width * 83492791 ^
+                worldRect.Height * 265443576
+            );
+
+            _damageMarks.Add(new DamageMark(worldRect, direction, markSeed));
+        }
+
+        private void DrawPersistentDamage()
+        {
+            for (int i = 0; i < _damageMarks.Count; i++)
             {
-                int along = 20 + (i * 71) % Math.Max(1, length - 40);
-                int x = direction > 0 ? left + along : left + length - along;
-                int y = centerY + Wave(_animationSeconds * 15f, i * 9, beamHeight / 2 + 8);
-                int size = 2 + i % 3;
-                Color ember = new Color((byte)255, (byte)104, (byte)18, (byte)(95 * intensity));
-                Game1.spriteBatch.Draw(_pixel, new Rectangle(x, y, size, size), ember);
+                DamageMark mark = _damageMarks[i];
+                Rectangle rect = Camera.TransformRect(mark.WorldRect);
+                DrawDestroyedSurface(rect, mark.Direction, mark.Seed);
+            }
+        }
+
+        private void DrawDestroyedSurface(Rectangle rect, int direction, int seed)
+        {
+            if (rect.Width <= 0 || rect.Height <= 0)
+            {
+                return;
+            }
+
+            Color hole = new Color((byte)4, (byte)4, (byte)5, (byte)225);
+            Color soot = new Color((byte)17, (byte)13, (byte)11, (byte)215);
+            Color charred = new Color((byte)40, (byte)24, (byte)14, (byte)205);
+            Color ash = new Color((byte)73, (byte)55, (byte)40, (byte)150);
+            Color ember = new Color((byte)143, (byte)67, (byte)12, (byte)135);
+            int maximumDepth = Math.Max(
+                1,
+                Math.Min(rect.Width, Math.Max(4, rect.Width * 3 / 4))
+            );
+            int strip = 0;
+            int y = rect.Top;
+            int depth = Math.Min(
+                maximumDepth,
+                2 + DamageValue(seed, 0, 5, Math.Max(1, maximumDepth))
+            );
+
+            while (y < rect.Bottom)
+            {
+                int stripHeight = Math.Min(
+                    rect.Bottom - y,
+                    1 + DamageValue(seed, strip, 7, 4)
+                );
+                int depthChange = DamageValue(seed, strip, 11, 7) - 3;
+                depth = Math.Max(1, Math.Min(maximumDepth, depth + depthChange));
+
+                if (DamageValue(seed, strip, 13, 100) >= 13)
+                {
+                    int raggedDepth = Math.Max(
+                        1,
+                        Math.Min(
+                            maximumDepth,
+                            depth + DamageValue(seed, strip, 17, 5) - 2
+                        )
+                    );
+                    int x = direction > 0
+                        ? rect.Left
+                        : rect.Right - raggedDepth;
+                    int colorRoll = DamageValue(seed, strip, 19, 100);
+                    Color burnColor = colorRoll < 48
+                        ? hole
+                        : colorRoll < 78
+                            ? soot
+                            : colorRoll < 94
+                                ? charred
+                                : ash;
+
+                    Game1.spriteBatch.Draw(
+                        _pixel,
+                        new Rectangle(x, y, raggedDepth, stripHeight),
+                        burnColor
+                    );
+                }
+
+                y += stripHeight;
+                strip++;
+            }
+
+            int pits = Math.Max(3, Math.Min(12, rect.Width * rect.Height / 48));
+            for (int i = 0; i < pits; i++)
+            {
+                int pitWidth = Math.Min(
+                    rect.Width,
+                    1 + DamageValue(seed, i, 23, 4)
+                );
+                int pitHeight = Math.Min(
+                    rect.Height,
+                    1 + DamageValue(seed, i, 29, 3)
+                );
+                int pitDepth = 1 + DamageValue(seed, i, 31, maximumDepth);
+                int pitX = direction > 0
+                    ? Math.Min(rect.Right - pitWidth, rect.Left + pitDepth - 1)
+                    : Math.Max(rect.Left, rect.Right - pitDepth - pitWidth + 1);
+                int pitY = rect.Top + DamageValue(
+                    seed,
+                    i,
+                    37,
+                    Math.Max(1, rect.Height - pitHeight + 1)
+                );
+
+                Game1.spriteBatch.Draw(
+                    _pixel,
+                    new Rectangle(pitX, pitY, pitWidth, pitHeight),
+                    DamageValue(seed, i, 41, 5) == 0 ? ember : hole
+                );
+            }
+
+            if (rect.Width <= 1)
+            {
+                return;
+            }
+
+            int cracks = Math.Max(2, Math.Min(7, rect.Height / 6 + 1));
+            int surfaceX = direction > 0 ? rect.Left : rect.Right - 1;
+            for (int i = 0; i < cracks; i++)
+            {
+                int crackY = rect.Top + DamageValue(seed, i, 43, rect.Height);
+                int crackDepth = Math.Min(
+                    Math.Max(0, rect.Width - 1),
+                    3 + DamageValue(seed, i, 47, Math.Max(1, rect.Width / 2 + 5))
+                );
+                int bendX = surfaceX + direction * Math.Max(1, crackDepth / 3);
+                int bendY = crackY + DamageValue(seed, i, 53, 9) - 4;
+                int endX = surfaceX + direction * crackDepth;
+                int endY = bendY + DamageValue(seed, i, 59, 11) - 5;
+
+                DrawDebrisLine(surfaceX, crackY, bendX, bendY, ember);
+                DrawDebrisLine(bendX, bendY, endX, endY, hole);
+
+                if (i % 2 == 0 && crackDepth >= 5)
+                {
+                    int branchX = bendX + direction * Math.Max(1, crackDepth / 3);
+                    int branchY = bendY + (
+                        DamageValue(seed, i, 61, 2) == 0 ? -3 : 3
+                    );
+                    DrawDebrisLine(bendX, bendY, branchX, branchY, soot);
+                }
+            }
+        }
+
+        private void DrawImpactDebris(int direction, float intensity)
+        {
+            for (int i = 0; i < _damageMarks.Count; i++)
+            {
+                DamageMark mark = _damageMarks[i];
+                if (mark.Seed != _damageSeed || mark.Direction != direction)
+                {
+                    continue;
+                }
+
+                Rectangle rect = Camera.TransformRect(mark.WorldRect);
+                int surfaceX = direction > 0 ? rect.Left : rect.Right;
+
+                for (int fragment = 0; fragment < 4; fragment++)
+                {
+                    float phase = (
+                        _animationSeconds * 2.8f +
+                        DamageValue(mark.Seed, i + fragment, 29, 100) / 100f
+                    ) % 1f;
+                    int distance = 5 + (int)(phase * 34f);
+                    int side = DamageValue(mark.Seed, fragment, 31, 2) == 0 ? -1 : 1;
+                    int x = surfaceX - direction * distance;
+                    int y = rect.Center.Y + side * (
+                        2 + (int)(phase * (8 + DamageValue(mark.Seed, fragment, 37, 18)))
+                    );
+                    int size = 2 + DamageValue(mark.Seed, fragment, 41, 3);
+                    byte alpha = (byte)(190f * intensity * (1f - phase * 0.55f));
+
+                    Game1.spriteBatch.Draw(
+                        _pixel,
+                        new Rectangle(x, y, size, Math.Max(1, size - 1)),
+                        new Color((byte)34, (byte)22, (byte)13, alpha)
+                    );
+                }
+            }
+        }
+
+        private static int DamageValue(int seed, int index, int salt, int range)
+        {
+            if (range <= 1)
+            {
+                return 0;
+            }
+
+            int value = seed * 73856093;
+            value ^= (index + 1) * 19349663;
+            value ^= salt * 83492791;
+            value ^= value >> 13;
+            value *= 1274126177;
+            value ^= value >> 16;
+
+            return (value & int.MaxValue) % range;
+        }
+
+        private struct DamageMark
+        {
+            public readonly Rectangle WorldRect;
+            public readonly int Direction;
+            public readonly int Seed;
+
+            public DamageMark(Rectangle worldRect, int direction, int seed)
+            {
+                WorldRect = worldRect;
+                Direction = direction;
+                Seed = seed;
             }
         }
 
