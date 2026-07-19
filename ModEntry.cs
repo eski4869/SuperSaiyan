@@ -38,9 +38,16 @@ namespace SuperSaiyan
             KamehamehaChargeSeconds + KamehamehaBeamSeconds;
         private const int KamehamehaMaximumLength = 480;
         private const int KamehamehaCollisionHeight = 40;
+        private const float GenkidamaChargeSeconds = 2.5f;
+        private const float GenkidamaMaximumFlightSeconds = 5f;
+        private const float GenkidamaExplosionSeconds = 1.8f;
+        private const float GenkidamaSpeed = 95f;
+        private const int GenkidamaRadius = 22;
+        private const int GenkidamaDamageRadius = 82;
         private const string CommandTarget = "super_saiyan";
         private const string ActivateCommand = "activate";
         private const string KamehamehaCommand = "kamehameha";
+        private const string GenkidamaCommand = "genkidama";
         private const string DeactivateCommand = "deactivate";
 
         private static SuperSaiyanAura _instance;
@@ -59,6 +66,10 @@ namespace SuperSaiyan
         private int _damageScreenIndex = -1;
         private Point? _lastRightDamageOrigin;
         private Point? _lastLeftDamageOrigin;
+        private GenkidamaPhase _genkidamaPhase;
+        private float _genkidamaPhaseSeconds;
+        private Vector2 _genkidamaWorldPosition;
+        private int _genkidamaDirection = 1;
         private int _lastHorizontalDirection = 1;
         private readonly List<DamageMark> _damageMarks = new List<DamageMark>();
 
@@ -113,6 +124,11 @@ namespace SuperSaiyan
                 FireKamehameha();
             }
 
+            if (shiftDown && WasKeyPressed(keyboardState, Keys.G))
+            {
+                StartGenkidama();
+            }
+
             _previousKeyboardState = keyboardState;
 
 
@@ -127,12 +143,15 @@ namespace SuperSaiyan
                 CaptureKamehamehaDamage();
                 _kamehamehaSeconds = Math.Max(0f, _kamehamehaSeconds - delta);
             }
+
+            UpdateGenkidama(delta);
         }
 
         public override void Draw()
         {
             if ((_remainingSeconds <= 0f &&
                  _kamehamehaSeconds <= 0f &&
+                 _genkidamaPhase == GenkidamaPhase.None &&
                  _damageMarks.Count == 0) ||
                 _pixel == null)
             {
@@ -146,27 +165,38 @@ namespace SuperSaiyan
 
             DrawPersistentDamage();
 
-            if (_remainingSeconds <= 0f && _kamehamehaSeconds <= 0f)
+            if (_remainingSeconds <= 0f &&
+                _kamehamehaSeconds <= 0f &&
+                _genkidamaPhase == GenkidamaPhase.None)
             {
                 return;
             }
 
             PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
-            if (player == null)
+            if (player != null)
             {
-                return;
+                Rectangle hitbox = Camera.TransformRect(player.m_body.GetHitbox());
+
+                if (_remainingSeconds > 0f)
+                {
+                    DrawEnergyAura(hitbox);
+                }
+
+                if (_kamehamehaSeconds > 0f)
+                {
+                    DrawKamehameha(player, hitbox);
+                }
+
+                if (_genkidamaPhase == GenkidamaPhase.Charge)
+                {
+                    DrawGenkidamaCharge(hitbox);
+                }
             }
 
-            Rectangle hitbox = Camera.TransformRect(player.m_body.GetHitbox());
-
-            if (_remainingSeconds > 0f)
+            if (_genkidamaPhase == GenkidamaPhase.Flight ||
+                _genkidamaPhase == GenkidamaPhase.Explosion)
             {
-                DrawEnergyAura(hitbox);
-            }
-
-            if (_kamehamehaSeconds > 0f)
-            {
-                DrawKamehameha(player, hitbox);
+                DrawGenkidamaProjectile();
             }
         }
 
@@ -210,6 +240,13 @@ namespace SuperSaiyan
             _lastLeftDamageOrigin = null;
         }
 
+        private void StartGenkidama()
+        {
+            _genkidamaPhase = GenkidamaPhase.Charge;
+            _genkidamaPhaseSeconds = 0f;
+            _damageSeed = (_damageSeed + 1) % 997;
+        }
+
         private void ProcessBrokerCommands()
         {
             BrokerCommandClient.Register(CommandTarget);
@@ -229,11 +266,134 @@ namespace SuperSaiyan
                     continue;
                 }
 
+                if (string.Equals(command, GenkidamaCommand, StringComparison.OrdinalIgnoreCase))
+                {
+                    StartGenkidama();
+                    continue;
+                }
+
                 if (string.Equals(command, DeactivateCommand, StringComparison.OrdinalIgnoreCase))
                 {
                     _remainingSeconds = 0f;
                     _kamehamehaSeconds = 0f;
+                    _genkidamaPhase = GenkidamaPhase.None;
+                    _genkidamaPhaseSeconds = 0f;
                 }
+            }
+        }
+
+        private void UpdateGenkidama(float delta)
+        {
+            if (_genkidamaPhase == GenkidamaPhase.None)
+            {
+                return;
+            }
+
+            _genkidamaPhaseSeconds += delta;
+
+            if (_genkidamaPhase == GenkidamaPhase.Charge)
+            {
+                PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+                if (player == null ||
+                    _genkidamaPhaseSeconds < GenkidamaChargeSeconds)
+                {
+                    return;
+                }
+
+                Rectangle hitbox = player.m_body.GetHitbox();
+                _genkidamaWorldPosition = new Vector2(
+                    hitbox.Center.X,
+                    hitbox.Top - 28
+                );
+                _genkidamaDirection = GetPlayerDirection(player);
+                _genkidamaPhase = GenkidamaPhase.Flight;
+                _genkidamaPhaseSeconds = 0f;
+                return;
+            }
+
+            if (_genkidamaPhase == GenkidamaPhase.Flight)
+            {
+                _genkidamaWorldPosition.X +=
+                    _genkidamaDirection * GenkidamaSpeed * delta;
+
+                if (GenkidamaHitsTerrain() ||
+                    _genkidamaPhaseSeconds >= GenkidamaMaximumFlightSeconds)
+                {
+                    ExplodeGenkidama();
+                }
+
+                return;
+            }
+
+            if (_genkidamaPhase == GenkidamaPhase.Explosion &&
+                _genkidamaPhaseSeconds >= GenkidamaExplosionSeconds)
+            {
+                _genkidamaPhase = GenkidamaPhase.None;
+                _genkidamaPhaseSeconds = 0f;
+            }
+        }
+
+        private bool GenkidamaHitsTerrain()
+        {
+            Rectangle query = new Rectangle(
+                (int)_genkidamaWorldPosition.X - GenkidamaRadius,
+                (int)_genkidamaWorldPosition.Y - GenkidamaRadius,
+                GenkidamaRadius * 2,
+                GenkidamaRadius * 2
+            );
+            AdvCollisionInfo collisionInfo = LevelManager.GetCollisionInfo(query);
+            IReadOnlyList<IBlock> blocks = collisionInfo.GetCollidedBlocks();
+
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                Rectangle overlap;
+                if (blocks[i].Intersects(query, out overlap) ==
+                    BlockCollisionType.Collision_Blocking)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void ExplodeGenkidama()
+        {
+            _genkidamaPhase = GenkidamaPhase.Explosion;
+            _genkidamaPhaseSeconds = 0f;
+            CaptureGenkidamaDamage();
+        }
+
+        private void CaptureGenkidamaDamage()
+        {
+            int centerX = (int)_genkidamaWorldPosition.X;
+            int centerY = (int)_genkidamaWorldPosition.Y;
+            Rectangle query = new Rectangle(
+                centerX - GenkidamaDamageRadius,
+                centerY - GenkidamaDamageRadius,
+                GenkidamaDamageRadius * 2,
+                GenkidamaDamageRadius * 2
+            );
+            AdvCollisionInfo collisionInfo = LevelManager.GetCollisionInfo(query);
+            IReadOnlyList<IBlock> blocks = collisionInfo.GetCollidedBlocks();
+
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                Rectangle overlap;
+                if (blocks[i].Intersects(query, out overlap) !=
+                    BlockCollisionType.Collision_Blocking)
+                {
+                    continue;
+                }
+
+                Rectangle damageRect = Rectangle.Intersect(overlap, query);
+                if (damageRect.Width <= 0 || damageRect.Height <= 0)
+                {
+                    continue;
+                }
+
+                int direction = damageRect.Center.X >= centerX ? 1 : -1;
+                AddDamageMark(damageRect, direction, _damageSeed);
             }
         }
 
@@ -294,9 +454,9 @@ namespace SuperSaiyan
             int coreHeight = 7 + Wave(_animationSeconds * 18f, 17, 2);
             int glowHeight = 24 + Wave(_animationSeconds * 13f, 23, 4);
 
-            DrawBeamLayer(startX, centerY, direction, length, glowHeight, new Color((byte)214, (byte)126, (byte)18, (byte)(78 * intensity)));
-            DrawBeamLayer(startX, centerY, direction, length, glowHeight / 2, new Color((byte)255, (byte)214, (byte)48, (byte)(132 * intensity)));
-            DrawBeamLayer(startX, centerY, direction, length, coreHeight, new Color((byte)255, (byte)255, (byte)206, (byte)(235 * intensity)));
+            DrawBeamLayer(startX, centerY, direction, length, glowHeight, new Color((byte)28, (byte)86, (byte)214, (byte)(82 * intensity)));
+            DrawBeamLayer(startX, centerY, direction, length, glowHeight / 2, new Color((byte)88, (byte)196, (byte)255, (byte)(142 * intensity)));
+            DrawBeamLayer(startX, centerY, direction, length, coreHeight, new Color((byte)235, (byte)252, (byte)255, (byte)(240 * intensity)));
 
             for (int i = 0; i < 15; i++)
             {
@@ -306,12 +466,160 @@ namespace SuperSaiyan
                 byte alpha = (byte)(80 + (i % 4) * 22);
                 Color color = i % 3 == 0
                     ? new Color((byte)255, (byte)255, (byte)255, alpha)
-                    : new Color((byte)255, (byte)214, (byte)42, alpha);
+                    : new Color((byte)102, (byte)211, (byte)255, alpha);
 
                 DrawBeamLine(startX, centerY + offset + jitter, direction, segmentLength, color);
             }
 
             DrawImpactDebris(direction, intensity);
+        }
+
+        private void DrawGenkidamaCharge(Rectangle hitbox)
+        {
+            float chargeT = Clamp01(
+                _genkidamaPhaseSeconds / GenkidamaChargeSeconds
+            );
+            int radius = 5 + (int)(chargeT * 18f) +
+                Wave(_animationSeconds * 11f, 71, 1);
+            int centerX = hitbox.Center.X;
+            int centerY = hitbox.Top - 14 - radius;
+            byte glowAlpha = (byte)(75 + chargeT * 95f);
+            byte coreAlpha = (byte)(155 + chargeT * 100f);
+
+            DrawOrb(
+                centerX,
+                centerY,
+                radius + 7,
+                new Color((byte)32, (byte)105, (byte)255, glowAlpha)
+            );
+            DrawOrb(
+                centerX,
+                centerY,
+                radius + 2,
+                new Color((byte)75, (byte)181, (byte)255, (byte)210)
+            );
+            DrawOrb(
+                centerX,
+                centerY,
+                Math.Max(2, radius - 3),
+                new Color((byte)225, (byte)248, (byte)255, coreAlpha)
+            );
+
+            for (int i = 0; i < 10; i++)
+            {
+                float angle = _animationSeconds * (1.8f + i * 0.04f) +
+                    i * 0.6283185f;
+                int orbit = radius + 8 + i % 3;
+                int x = centerX + (int)(Math.Cos(angle) * orbit);
+                int y = centerY + (int)(Math.Sin(angle) * orbit * 0.65f);
+                int size = 1 + i % 2;
+                Game1.spriteBatch.Draw(
+                    _pixel,
+                    new Rectangle(x, y, size, size),
+                    new Color((byte)126, (byte)211, (byte)255, (byte)190)
+                );
+            }
+        }
+
+        private void DrawGenkidamaProjectile()
+        {
+            Rectangle point = Camera.TransformRect(
+                new Rectangle(
+                    (int)_genkidamaWorldPosition.X,
+                    (int)_genkidamaWorldPosition.Y,
+                    1,
+                    1
+                )
+            );
+            int centerX = point.X;
+            int centerY = point.Y;
+
+            if (_genkidamaPhase == GenkidamaPhase.Flight)
+            {
+                int pulse = Wave(_animationSeconds * 15f, 83, 2);
+                int radius = GenkidamaRadius + pulse;
+
+                DrawOrb(
+                    centerX,
+                    centerY,
+                    radius + 8,
+                    new Color((byte)24, (byte)82, (byte)255, (byte)90)
+                );
+                DrawOrb(
+                    centerX,
+                    centerY,
+                    radius + 3,
+                    new Color((byte)69, (byte)174, (byte)255, (byte)215)
+                );
+                DrawOrb(
+                    centerX,
+                    centerY,
+                    Math.Max(3, radius - 5),
+                    new Color((byte)234, (byte)251, (byte)255, (byte)250)
+                );
+                return;
+            }
+
+            float explosionT = Clamp01(
+                _genkidamaPhaseSeconds / GenkidamaExplosionSeconds
+            );
+            int explosionRadius = GenkidamaRadius +
+                (int)(explosionT * GenkidamaDamageRadius);
+            byte outerAlpha = (byte)(150f * (1f - explosionT));
+            byte middleAlpha = (byte)(225f * (1f - explosionT * 0.75f));
+            byte coreAlpha = (byte)(255f * (1f - explosionT));
+
+            for (int i = 0; i < 28; i++)
+            {
+                float angle = i * 0.2243995f +
+                    DamageValue(_damageSeed, i, 109, 100) * 0.0018f;
+                int innerRadius = Math.Max(4, explosionRadius / 3);
+                int rayLength = explosionRadius +
+                    14 +
+                    DamageValue(_damageSeed, i, 113, 48);
+                int startX = centerX + (int)(Math.Cos(angle) * innerRadius);
+                int startY = centerY + (int)(Math.Sin(angle) * innerRadius);
+                int endX = centerX + (int)(Math.Cos(angle) * rayLength);
+                int endY = centerY + (int)(Math.Sin(angle) * rayLength);
+                byte rayAlpha = (byte)(
+                    (110 + DamageValue(_damageSeed, i, 127, 100)) *
+                    (1f - explosionT)
+                );
+                Color rayColor = i % 3 == 0
+                    ? new Color(
+                        (byte)230,
+                        (byte)250,
+                        (byte)255,
+                        rayAlpha
+                    )
+                    : new Color(
+                        (byte)55,
+                        (byte)143,
+                        (byte)255,
+                        rayAlpha
+                    );
+
+                DrawDebrisLine(startX, startY, endX, endY, rayColor);
+            }
+
+            DrawOrb(
+                centerX,
+                centerY,
+                explosionRadius + 12,
+                new Color((byte)22, (byte)78, (byte)255, outerAlpha)
+            );
+            DrawOrb(
+                centerX,
+                centerY,
+                explosionRadius,
+                new Color((byte)74, (byte)185, (byte)255, middleAlpha)
+            );
+            DrawOrb(
+                centerX,
+                centerY,
+                Math.Max(3, explosionRadius / 2),
+                new Color((byte)238, (byte)252, (byte)255, coreAlpha)
+            );
         }
 
         private void UpdateDamageScreen()
@@ -631,6 +939,14 @@ namespace SuperSaiyan
             return (value & int.MaxValue) % range;
         }
 
+        private enum GenkidamaPhase
+        {
+            None,
+            Charge,
+            Flight,
+            Explosion
+        }
+
         private struct DamageMark
         {
             public readonly Rectangle WorldRect;
@@ -697,9 +1013,9 @@ namespace SuperSaiyan
             int radius = 4 + (int)(chargeT * 7f) + Wave(_animationSeconds * 18f, 31, 1);
             byte alpha = (byte)(100 + chargeT * 120f);
 
-            DrawOrb(startX, centerY, radius + 5, new Color((byte)210, (byte)112, (byte)10, (byte)(alpha * 0.34f)));
-            DrawOrb(startX, centerY, radius + 2, new Color((byte)255, (byte)224, (byte)54, (byte)(alpha * 0.58f)));
-            DrawOrb(startX, centerY, radius, new Color((byte)255, (byte)255, (byte)210, alpha));
+            DrawOrb(startX, centerY, radius + 5, new Color((byte)25, (byte)83, (byte)211, (byte)(alpha * 0.38f)));
+            DrawOrb(startX, centerY, radius + 2, new Color((byte)91, (byte)202, (byte)255, (byte)(alpha * 0.64f)));
+            DrawOrb(startX, centerY, radius, new Color((byte)235, (byte)252, (byte)255, alpha));
         }
 
         private void DrawBeamLayer(int startX, int centerY, int direction, int length, int height, Color color)
