@@ -29,7 +29,10 @@ namespace SuperSaiyan
         }
     }
 
-    public sealed class SuperSaiyanAura : Entity, JumpKing.Util.IDrawable
+    public sealed class SuperSaiyanAura :
+        Entity,
+        JumpKing.Util.IDrawable,
+        JumpKing.Util.Tags.IForeground
     {
         private const float AuraDurationSeconds = 20f;
         private const float KamehamehaChargeSeconds = 1f;
@@ -38,12 +41,13 @@ namespace SuperSaiyan
             KamehamehaChargeSeconds + KamehamehaBeamSeconds;
         private const int KamehamehaMaximumLength = 480;
         private const int KamehamehaCollisionHeight = 40;
+        private const float KamehamehaDamageSampleSeconds = 0.25f;
         private const float GenkidamaChargeSeconds = 2.5f;
-        private const float GenkidamaMaximumFlightSeconds = 5f;
         private const float GenkidamaExplosionSeconds = 1.8f;
-        private const float GenkidamaSpeed = 95f;
+        private const float GenkidamaSpeed = 55f;
         private const int GenkidamaRadius = 22;
         private const int GenkidamaDamageRadius = 82;
+        private const int GenkidamaOffscreenExplosionDepth = 52;
         private const string CommandTarget = "super_saiyan";
         private const string ActivateCommand = "activate";
         private const string KamehamehaCommand = "kamehameha";
@@ -66,6 +70,7 @@ namespace SuperSaiyan
         private int _damageScreenIndex = -1;
         private Point? _lastRightDamageOrigin;
         private Point? _lastLeftDamageOrigin;
+        private int _lastKamehamehaDamageSample = -1;
         private GenkidamaPhase _genkidamaPhase;
         private float _genkidamaPhaseSeconds;
         private Vector2 _genkidamaWorldPosition;
@@ -151,8 +156,7 @@ namespace SuperSaiyan
         {
             if ((_remainingSeconds <= 0f &&
                  _kamehamehaSeconds <= 0f &&
-                 _genkidamaPhase == GenkidamaPhase.None &&
-                 _damageMarks.Count == 0) ||
+                 _genkidamaPhase == GenkidamaPhase.None) ||
                 _pixel == null)
             {
                 return;
@@ -162,8 +166,6 @@ namespace SuperSaiyan
             {
                 return;
             }
-
-            DrawPersistentDamage();
 
             if (_remainingSeconds <= 0f &&
                 _kamehamehaSeconds <= 0f &&
@@ -182,14 +184,40 @@ namespace SuperSaiyan
                     DrawEnergyAura(hitbox);
                 }
 
-                if (_kamehamehaSeconds > 0f)
-                {
-                    DrawKamehameha(player, hitbox);
-                }
+            }
 
-                if (_genkidamaPhase == GenkidamaPhase.Charge)
+        }
+
+        public void ForegroundDraw()
+        {
+            if (_pixel == null || Game1.instance == null)
+            {
+                return;
+            }
+
+            if (_damageMarks.Count > 0)
+            {
+                DrawPersistentDamage();
+            }
+
+            if (_kamehamehaSeconds > 0f ||
+                _genkidamaPhase == GenkidamaPhase.Charge)
+            {
+                PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+                if (player != null)
                 {
-                    DrawGenkidamaCharge(hitbox);
+                    Rectangle hitbox =
+                        Camera.TransformRect(player.m_body.GetHitbox());
+
+                    if (_kamehamehaSeconds > 0f)
+                    {
+                        DrawKamehameha(player, hitbox);
+                    }
+
+                    if (_genkidamaPhase == GenkidamaPhase.Charge)
+                    {
+                        DrawGenkidamaCharge(hitbox);
+                    }
                 }
             }
 
@@ -238,6 +266,7 @@ namespace SuperSaiyan
             _damageSeed = (_damageSeed + 1) % 997;
             _lastRightDamageOrigin = null;
             _lastLeftDamageOrigin = null;
+            _lastKamehamehaDamageSample = -1;
         }
 
         private void StartGenkidama()
@@ -317,7 +346,7 @@ namespace SuperSaiyan
                     _genkidamaDirection * GenkidamaSpeed * delta;
 
                 if (GenkidamaHitsTerrain() ||
-                    _genkidamaPhaseSeconds >= GenkidamaMaximumFlightSeconds)
+                    GenkidamaReachedOffscreenExplosionPoint())
                 {
                     ExplodeGenkidama();
                 }
@@ -357,6 +386,23 @@ namespace SuperSaiyan
             return false;
         }
 
+        private bool GenkidamaReachedOffscreenExplosionPoint()
+        {
+            Rectangle screenPosition = Camera.TransformRect(
+                new Rectangle(
+                    (int)_genkidamaWorldPosition.X,
+                    (int)_genkidamaWorldPosition.Y,
+                    1,
+                    1
+                )
+            );
+
+            return _genkidamaDirection > 0
+                ? screenPosition.X >=
+                    Game1.WIDTH + GenkidamaOffscreenExplosionDepth
+                : screenPosition.X <= -GenkidamaOffscreenExplosionDepth;
+        }
+
         private void ExplodeGenkidama()
         {
             _genkidamaPhase = GenkidamaPhase.Explosion;
@@ -392,8 +438,21 @@ namespace SuperSaiyan
                     continue;
                 }
 
-                int direction = damageRect.Center.X >= centerX ? 1 : -1;
-                AddDamageMark(damageRect, direction, _damageSeed);
+                Point blastCenter = new Point(centerX, centerY);
+                if (!IntersectsCircle(
+                    damageRect,
+                    blastCenter,
+                    GenkidamaDamageRadius))
+                {
+                    continue;
+                }
+
+                AddBlastDamageMark(
+                    damageRect,
+                    blastCenter,
+                    GenkidamaDamageRadius,
+                    _damageSeed
+                );
             }
         }
 
@@ -565,9 +624,7 @@ namespace SuperSaiyan
             );
             int explosionRadius = GenkidamaRadius +
                 (int)(explosionT * GenkidamaDamageRadius);
-            byte outerAlpha = (byte)(150f * (1f - explosionT));
-            byte middleAlpha = (byte)(225f * (1f - explosionT * 0.75f));
-            byte coreAlpha = (byte)(255f * (1f - explosionT));
+            float rayFade = 1f - Clamp01((explosionT - 0.42f) / 0.18f);
 
             for (int i = 0; i < 28; i++)
             {
@@ -583,7 +640,8 @@ namespace SuperSaiyan
                 int endY = centerY + (int)(Math.Sin(angle) * rayLength);
                 byte rayAlpha = (byte)(
                     (110 + DamageValue(_damageSeed, i, 127, 100)) *
-                    (1f - explosionT)
+                    (1f - explosionT) *
+                    rayFade
                 );
                 Color rayColor = i % 3 == 0
                     ? new Color(
@@ -602,24 +660,133 @@ namespace SuperSaiyan
                 DrawDebrisLine(startX, startY, endX, endY, rayColor);
             }
 
-            DrawOrb(
+            if (explosionT < 0.55f)
+            {
+                DrawOrb(
+                    centerX,
+                    centerY,
+                    explosionRadius + 12,
+                    new Color(
+                        (byte)22,
+                        (byte)78,
+                        (byte)255,
+                        (byte)(150f * (1f - explosionT))
+                    )
+                );
+                DrawOrb(
+                    centerX,
+                    centerY,
+                    explosionRadius,
+                    new Color(
+                        (byte)74,
+                        (byte)185,
+                        (byte)255,
+                        (byte)(225f * (1f - explosionT * 0.75f))
+                    )
+                );
+                DrawOrb(
+                    centerX,
+                    centerY,
+                    Math.Max(3, explosionRadius / 2),
+                    new Color(
+                        (byte)238,
+                        (byte)252,
+                        (byte)255,
+                        (byte)(255f * (1f - explosionT))
+                    )
+                );
+                return;
+            }
+
+            DrawDissolvingExplosion(
                 centerX,
                 centerY,
                 explosionRadius + 12,
-                new Color((byte)22, (byte)78, (byte)255, outerAlpha)
+                Clamp01((explosionT - 0.55f) / 0.45f)
             );
-            DrawOrb(
-                centerX,
-                centerY,
-                explosionRadius,
-                new Color((byte)74, (byte)185, (byte)255, middleAlpha)
-            );
-            DrawOrb(
-                centerX,
-                centerY,
-                Math.Max(3, explosionRadius / 2),
-                new Color((byte)238, (byte)252, (byte)255, coreAlpha)
-            );
+        }
+
+        private void DrawDissolvingExplosion(
+            int centerX,
+            int centerY,
+            int radius,
+            float dissolveT
+        )
+        {
+            int chunkIndex = 0;
+            for (int y = -radius; y <= radius; y += 3)
+            {
+                float normalizedY = y / (float)radius;
+                int halfWidth = (int)Math.Round(
+                    Math.Sqrt(Math.Max(
+                        0f,
+                        1f - normalizedY * normalizedY
+                    )) * radius
+                );
+                int x = -halfWidth;
+
+                while (x <= halfWidth)
+                {
+                    int width = 5 +
+                        DamageValue(_damageSeed, chunkIndex, 131, 9);
+                    int remaining = halfWidth - x + 1;
+                    width = Math.Min(width, remaining);
+                    float lifetime = 0.16f +
+                        DamageValue(
+                            _damageSeed,
+                            chunkIndex,
+                            137,
+                            84
+                        ) / 100f;
+
+                    if (dissolveT < lifetime)
+                    {
+                        float localFade = Clamp01(
+                            (lifetime - dissolveT) / 0.14f
+                        );
+                        float chunkCenterX = x + width * 0.5f;
+                        float distance = (float)Math.Sqrt(
+                            chunkCenterX * chunkCenterX + y * y
+                        );
+                        float proximity = 1f - Clamp01(distance / radius);
+                        byte alpha = (byte)(225f * localFade);
+                        Color color = proximity > 0.58f
+                            ? new Color(
+                                (byte)238,
+                                (byte)252,
+                                (byte)255,
+                                alpha
+                            )
+                            : proximity > 0.24f
+                                ? new Color(
+                                    (byte)74,
+                                    (byte)185,
+                                    (byte)255,
+                                    alpha
+                                )
+                                : new Color(
+                                    (byte)22,
+                                    (byte)78,
+                                    (byte)255,
+                                    alpha
+                                );
+
+                        Game1.spriteBatch.Draw(
+                            _pixel,
+                            new Rectangle(
+                                centerX + x,
+                                centerY + y,
+                                width,
+                                Math.Min(3, radius - y + 1)
+                            ),
+                            color
+                        );
+                    }
+
+                    x += width;
+                    chunkIndex++;
+                }
+            }
         }
 
         private void UpdateDamageScreen()
@@ -636,6 +803,7 @@ namespace SuperSaiyan
             _damageMarks.Clear();
             _lastRightDamageOrigin = null;
             _lastLeftDamageOrigin = null;
+            _lastKamehamehaDamageSample = -1;
         }
 
         private void CaptureKamehamehaDamage()
@@ -661,13 +829,25 @@ namespace SuperSaiyan
             Point? previousOrigin = direction > 0
                 ? _lastRightDamageOrigin
                 : _lastLeftDamageOrigin;
+            bool originMoved =
+                !previousOrigin.HasValue ||
+                Math.Abs(previousOrigin.Value.X - origin.X) >= 12 ||
+                Math.Abs(previousOrigin.Value.Y - origin.Y) >= 6;
+            int damageSample = (int)(
+                (elapsed - KamehamehaChargeSeconds) /
+                KamehamehaDamageSampleSeconds
+            );
 
-            if (previousOrigin.HasValue &&
-                Math.Abs(previousOrigin.Value.X - origin.X) < 12 &&
-                Math.Abs(previousOrigin.Value.Y - origin.Y) < 6)
+            if (!originMoved &&
+                damageSample <= _lastKamehamehaDamageSample)
             {
                 return;
             }
+
+            _lastKamehamehaDamageSample = Math.Max(
+                _lastKamehamehaDamageSample,
+                damageSample
+            );
 
             if (direction > 0)
             {
@@ -732,7 +912,8 @@ namespace SuperSaiyan
                     _damageMarks[i] = new DamageMark(
                         combined,
                         direction,
-                        existing.Seed
+                        existing.Seed,
+                        Math.Min(32, existing.Exposure + 1)
                     );
                     return;
                 }
@@ -746,7 +927,40 @@ namespace SuperSaiyan
                 worldRect.Height * 265443576
             );
 
-            _damageMarks.Add(new DamageMark(worldRect, direction, markSeed));
+            _damageMarks.Add(new DamageMark(worldRect, direction, markSeed, 1));
+        }
+
+        private void AddBlastDamageMark(
+            Rectangle worldRect,
+            Point center,
+            int radius,
+            int seed
+        )
+        {
+            int markSeed = unchecked(
+                seed ^
+                worldRect.X * 73856093 ^
+                worldRect.Y * 19349663 ^
+                worldRect.Width * 83492791 ^
+                worldRect.Height * 265443576
+            );
+
+            _damageMarks.Add(
+                new DamageMark(worldRect, center, radius, markSeed)
+            );
+        }
+
+        private static bool IntersectsCircle(
+            Rectangle rect,
+            Point center,
+            int radius
+        )
+        {
+            int nearestX = Math.Max(rect.Left, Math.Min(center.X, rect.Right));
+            int nearestY = Math.Max(rect.Top, Math.Min(center.Y, rect.Bottom));
+            int dx = nearestX - center.X;
+            int dy = nearestY - center.Y;
+            return dx * dx + dy * dy <= radius * radius;
         }
 
         private void DrawPersistentDamage()
@@ -755,25 +969,56 @@ namespace SuperSaiyan
             {
                 DamageMark mark = _damageMarks[i];
                 Rectangle rect = Camera.TransformRect(mark.WorldRect);
-                DrawDestroyedSurface(rect, mark.Direction, mark.Seed);
+                if (mark.Shape == DamageShape.Blast)
+                {
+                    Point center = Camera.TransformRect(
+                        new Rectangle(mark.BlastCenter.X, mark.BlastCenter.Y, 1, 1)
+                    ).Location;
+                    DrawExplosionDamage(rect, center, mark.Radius, mark.Seed);
+                }
+                else
+                {
+                    DrawDestroyedSurface(
+                        rect,
+                        mark.Direction,
+                        mark.Seed,
+                        mark.Exposure
+                    );
+                }
             }
         }
 
-        private void DrawDestroyedSurface(Rectangle rect, int direction, int seed)
+        private void DrawDestroyedSurface(
+            Rectangle rect,
+            int direction,
+            int seed,
+            int exposure
+        )
         {
             if (rect.Width <= 0 || rect.Height <= 0)
             {
                 return;
             }
 
-            Color hole = new Color((byte)4, (byte)4, (byte)5, (byte)225);
-            Color soot = new Color((byte)17, (byte)13, (byte)11, (byte)215);
-            Color charred = new Color((byte)40, (byte)24, (byte)14, (byte)205);
-            Color ash = new Color((byte)73, (byte)55, (byte)40, (byte)150);
-            Color ember = new Color((byte)143, (byte)67, (byte)12, (byte)135);
-            int maximumDepth = Math.Max(
+            Color hole = new Color((byte)3, (byte)3, (byte)3, (byte)230);
+            Color soot = new Color((byte)12, (byte)10, (byte)8, (byte)220);
+            Color charred = new Color((byte)29, (byte)20, (byte)14, (byte)215);
+            Color ash = new Color((byte)47, (byte)36, (byte)27, (byte)175);
+            Color scorchedBrown = new Color(
+                (byte)55,
+                (byte)32,
+                (byte)20,
+                (byte)170
+            );
+            int fullDepth = Math.Max(
                 1,
                 Math.Min(rect.Width, Math.Max(4, rect.Width * 3 / 4))
+            );
+            int exposurePercent = Math.Min(88, 8 + exposure * 4);
+            int burnChance = Math.Min(68, 4 + exposure * 3);
+            int maximumDepth = Math.Max(
+                1,
+                fullDepth * exposurePercent / 100
             );
             int strip = 0;
             int y = rect.Top;
@@ -791,7 +1036,7 @@ namespace SuperSaiyan
                 int depthChange = DamageValue(seed, strip, 11, 7) - 3;
                 depth = Math.Max(1, Math.Min(maximumDepth, depth + depthChange));
 
-                if (DamageValue(seed, strip, 13, 100) >= 13)
+                if (DamageValue(seed, strip, 13, 100) < burnChance)
                 {
                     int raggedDepth = Math.Max(
                         1,
@@ -823,7 +1068,11 @@ namespace SuperSaiyan
                 strip++;
             }
 
-            int pits = Math.Max(3, Math.Min(12, rect.Width * rect.Height / 48));
+            int maximumPits = Math.Max(
+                3,
+                Math.Min(12, rect.Width * rect.Height / 48)
+            );
+            int pits = Math.Max(1, maximumPits * exposurePercent / 100);
             for (int i = 0; i < pits; i++)
             {
                 int pitWidth = Math.Min(
@@ -848,7 +1097,9 @@ namespace SuperSaiyan
                 Game1.spriteBatch.Draw(
                     _pixel,
                     new Rectangle(pitX, pitY, pitWidth, pitHeight),
-                    DamageValue(seed, i, 41, 5) == 0 ? ember : hole
+                    DamageValue(seed, i, 41, 5) == 0
+                        ? scorchedBrown
+                        : hole
                 );
             }
 
@@ -857,7 +1108,8 @@ namespace SuperSaiyan
                 return;
             }
 
-            int cracks = Math.Max(2, Math.Min(7, rect.Height / 6 + 1));
+            int maximumCracks = Math.Max(2, Math.Min(7, rect.Height / 6 + 1));
+            int cracks = Math.Max(1, maximumCracks * exposurePercent / 100);
             int surfaceX = direction > 0 ? rect.Left : rect.Right - 1;
             for (int i = 0; i < cracks; i++)
             {
@@ -871,7 +1123,13 @@ namespace SuperSaiyan
                 int endX = surfaceX + direction * crackDepth;
                 int endY = bendY + DamageValue(seed, i, 59, 11) - 5;
 
-                DrawDebrisLine(surfaceX, crackY, bendX, bendY, ember);
+                DrawDebrisLine(
+                    surfaceX,
+                    crackY,
+                    bendX,
+                    bendY,
+                    scorchedBrown
+                );
                 DrawDebrisLine(bendX, bendY, endX, endY, hole);
 
                 if (i % 2 == 0 && crackDepth >= 5)
@@ -881,6 +1139,82 @@ namespace SuperSaiyan
                         DamageValue(seed, i, 61, 2) == 0 ? -3 : 3
                     );
                     DrawDebrisLine(bendX, bendY, branchX, branchY, soot);
+                }
+            }
+        }
+
+        private void DrawExplosionDamage(
+            Rectangle rect,
+            Point center,
+            int radius,
+            int seed
+        )
+        {
+            if (rect.Width <= 0 || rect.Height <= 0 || radius <= 0)
+            {
+                return;
+            }
+
+            Color hole = new Color((byte)3, (byte)3, (byte)3, (byte)230);
+            Color soot = new Color((byte)12, (byte)10, (byte)8, (byte)220);
+            Color charred = new Color((byte)29, (byte)20, (byte)14, (byte)215);
+            Color ash = new Color((byte)47, (byte)36, (byte)27, (byte)175);
+            Color scorchedBrown = new Color(
+                (byte)55,
+                (byte)32,
+                (byte)20,
+                (byte)170
+            );
+            int samples = Math.Max(
+                10,
+                Math.Min(64, rect.Width * rect.Height / 36)
+            );
+            float radiusSquared = radius * radius;
+
+            for (int i = 0; i < samples; i++)
+            {
+                int x = rect.Left + DamageValue(seed, i, 71, rect.Width);
+                int y = rect.Top + DamageValue(seed, i, 73, rect.Height);
+                float dx = x - center.X;
+                float dy = y - center.Y;
+                float distanceSquared = dx * dx + dy * dy;
+
+                if (distanceSquared > radiusSquared)
+                {
+                    continue;
+                }
+
+                float distance = (float)Math.Sqrt(distanceSquared);
+                float proximity = 1f - distance / radius;
+                int chance = 12 + (int)(proximity * 78f);
+                if (DamageValue(seed, i, 79, 100) >= chance)
+                {
+                    continue;
+                }
+
+                int maximumSize = 2 + (int)(proximity * 6f);
+                int patchWidth = Math.Min(
+                    rect.Right - x,
+                    1 + DamageValue(seed, i, 83, Math.Max(1, maximumSize))
+                );
+                int patchHeight = Math.Min(
+                    rect.Bottom - y,
+                    1 + DamageValue(seed, i, 89, Math.Max(1, maximumSize / 2 + 1))
+                );
+                int colorRoll = DamageValue(seed, i, 97, 100);
+                Color color = proximity > 0.68f
+                    ? (colorRoll < 68 ? hole : soot)
+                    : proximity > 0.32f
+                        ? (colorRoll < 52 ? soot : charred)
+                        : (colorRoll < 58 ? ash : scorchedBrown);
+
+                if (patchWidth > 0 && patchHeight > 0)
+                {
+                    Game1.spriteBatch.Draw(
+                        _pixel,
+                        new Rectangle(x, y, patchWidth, patchHeight),
+                        color
+                    );
                 }
             }
         }
@@ -947,17 +1281,52 @@ namespace SuperSaiyan
             Explosion
         }
 
+        private enum DamageShape
+        {
+            Beam,
+            Blast
+        }
+
         private struct DamageMark
         {
             public readonly Rectangle WorldRect;
             public readonly int Direction;
             public readonly int Seed;
+            public readonly int Exposure;
+            public readonly DamageShape Shape;
+            public readonly Point BlastCenter;
+            public readonly int Radius;
 
-            public DamageMark(Rectangle worldRect, int direction, int seed)
+            public DamageMark(
+                Rectangle worldRect,
+                int direction,
+                int seed,
+                int exposure
+            )
             {
                 WorldRect = worldRect;
                 Direction = direction;
                 Seed = seed;
+                Exposure = exposure;
+                Shape = DamageShape.Beam;
+                BlastCenter = Point.Zero;
+                Radius = 0;
+            }
+
+            public DamageMark(
+                Rectangle worldRect,
+                Point blastCenter,
+                int radius,
+                int seed
+            )
+            {
+                WorldRect = worldRect;
+                Direction = 0;
+                Seed = seed;
+                Exposure = 1;
+                Shape = DamageShape.Blast;
+                BlastCenter = blastCenter;
+                Radius = radius;
             }
         }
 
