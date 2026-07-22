@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
 using EntityComponent;
 using JumpKing;
@@ -45,13 +46,27 @@ namespace SuperSaiyan
         private const float GenkidamaChargeSeconds = 2.5f;
         private const float GenkidamaExplosionSeconds = 1.8f;
         private const float GenkidamaSpeed = 55f;
-        private const int GenkidamaRadius = 22;
+        private const int GenkidamaRadius = 18;
+        private const int GenkidamaArmingClearance = 32;
         private const int GenkidamaDamageRadius = 82;
         private const int GenkidamaOffscreenExplosionDepth = 52;
+        private const float DragonBallLifetimeSeconds = 20f;
+        private const float DragonBallGravity = 92f;
+        private const float ShenronDelaySeconds = 3f;
+        private const float ShenronFadeInSeconds = 2f;
+        private const float ShenronVisibleSeconds = 4.7f;
+        private const float ShenronFadeOutSeconds = 3f;
+        private const float ShenronSequenceSeconds =
+            ShenronDelaySeconds +
+            ShenronFadeInSeconds +
+            ShenronVisibleSeconds +
+            ShenronFadeOutSeconds;
+        private const int DragonBallRadius = 6;
         private const string CommandTarget = "super_saiyan";
         private const string ActivateCommand = "activate";
         private const string KamehamehaCommand = "kamehameha";
         private const string GenkidamaCommand = "genkidama";
+        private const string DragonBallCommand = "dragon-ball";
         private const string DeactivateCommand = "deactivate";
 
         private static SuperSaiyanAura _instance;
@@ -59,9 +74,30 @@ namespace SuperSaiyan
             "m_flip",
             BindingFlags.Instance | BindingFlags.NonPublic
         );
+        private static readonly Point[] DragonBallStarPositions =
+        {
+            new Point(0, 0),
+            new Point(-2, -2),
+            new Point(2, 2),
+            new Point(2, -2),
+            new Point(-2, 2),
+            new Point(-2, 0),
+            new Point(2, 0)
+        };
+        private static readonly int[][] DragonBallStarIndexes =
+        {
+            new[] { 0 },
+            new[] { 1, 2 },
+            new[] { 1, 0, 2 },
+            new[] { 1, 3, 4, 2 },
+            new[] { 1, 3, 0, 4, 2 },
+            new[] { 1, 3, 5, 6, 4, 2 },
+            new[] { 1, 3, 5, 0, 6, 4, 2 }
+        };
 
         private Texture2D[] _auraFrames;
         private Texture2D _pixel;
+        private Texture2D _shenronTexture;
         private KeyboardState _previousKeyboardState;
         private float _remainingSeconds;
         private float _kamehamehaSeconds;
@@ -75,8 +111,14 @@ namespace SuperSaiyan
         private float _genkidamaPhaseSeconds;
         private Vector2 _genkidamaWorldPosition;
         private int _genkidamaDirection = 1;
+        private bool _genkidamaArmed;
         private int _lastHorizontalDirection = 1;
+        private readonly Random _random = new Random();
         private readonly List<DamageMark> _damageMarks = new List<DamageMark>();
+        private readonly List<DragonBallProjectile> _dragonBalls =
+            new List<DragonBallProjectile>();
+        private int _dragonBallCount;
+        private float _shenronSeconds;
 
         public static void RegisterCommandTarget()
         {
@@ -150,6 +192,8 @@ namespace SuperSaiyan
             }
 
             UpdateGenkidama(delta);
+            UpdateDragonBalls(delta);
+            UpdateShenron(delta);
         }
 
         public override void Draw()
@@ -226,6 +270,13 @@ namespace SuperSaiyan
             {
                 DrawGenkidamaProjectile();
             }
+
+            DrawDragonBalls();
+
+            if (_shenronSeconds > 0f)
+            {
+                DrawShenron();
+            }
         }
 
         protected override void OnDestroy()
@@ -246,8 +297,15 @@ namespace SuperSaiyan
                 _pixel.Dispose();
             }
 
+            if (_shenronTexture != null)
+            {
+                _shenronTexture.Dispose();
+            }
+
+
             _auraFrames = null;
             _pixel = null;
+            _shenronTexture = null;
 
             if (ReferenceEquals(_instance, this))
             {
@@ -273,6 +331,7 @@ namespace SuperSaiyan
         {
             _genkidamaPhase = GenkidamaPhase.Charge;
             _genkidamaPhaseSeconds = 0f;
+            _genkidamaArmed = false;
             _damageSeed = (_damageSeed + 1) % 997;
         }
 
@@ -301,12 +360,22 @@ namespace SuperSaiyan
                     continue;
                 }
 
+                if (string.Equals(command, DragonBallCommand, StringComparison.OrdinalIgnoreCase))
+                {
+                    FireDragonBall();
+                    continue;
+                }
+
                 if (string.Equals(command, DeactivateCommand, StringComparison.OrdinalIgnoreCase))
                 {
                     _remainingSeconds = 0f;
                     _kamehamehaSeconds = 0f;
                     _genkidamaPhase = GenkidamaPhase.None;
                     _genkidamaPhaseSeconds = 0f;
+                    _genkidamaArmed = false;
+                    _dragonBalls.Clear();
+                    _dragonBallCount = 0;
+                    _shenronSeconds = 0f;
                 }
             }
         }
@@ -337,6 +406,7 @@ namespace SuperSaiyan
                 _genkidamaDirection = GetPlayerDirection(player);
                 _genkidamaPhase = GenkidamaPhase.Flight;
                 _genkidamaPhaseSeconds = 0f;
+                _genkidamaArmed = false;
                 return;
             }
 
@@ -345,7 +415,12 @@ namespace SuperSaiyan
                 _genkidamaWorldPosition.X +=
                     _genkidamaDirection * GenkidamaSpeed * delta;
 
-                if (GenkidamaHitsTerrain() ||
+                if (!_genkidamaArmed)
+                {
+                    _genkidamaArmed = GenkidamaIsClearOfPlayer();
+                }
+
+                if ((_genkidamaArmed && GenkidamaHitsTerrain()) ||
                     GenkidamaReachedOffscreenExplosionPoint())
                 {
                     ExplodeGenkidama();
@@ -360,6 +435,413 @@ namespace SuperSaiyan
                 _genkidamaPhase = GenkidamaPhase.None;
                 _genkidamaPhaseSeconds = 0f;
             }
+        }
+
+        private bool GenkidamaIsClearOfPlayer()
+        {
+            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            if (player == null)
+            {
+                return false;
+            }
+
+            Rectangle hitbox = player.m_body.GetHitbox();
+            float closestX = Math.Max(
+                hitbox.Left,
+                Math.Min(hitbox.Right, _genkidamaWorldPosition.X)
+            );
+            float closestY = Math.Max(
+                hitbox.Top,
+                Math.Min(hitbox.Bottom, _genkidamaWorldPosition.Y)
+            );
+            float deltaX = _genkidamaWorldPosition.X - closestX;
+            float deltaY = _genkidamaWorldPosition.Y - closestY;
+
+            return deltaX * deltaX + deltaY * deltaY >
+                GenkidamaArmingClearance * GenkidamaArmingClearance;
+        }
+
+        private void FireDragonBall()
+        {
+            if (_dragonBallCount >= 7)
+            {
+                return;
+            }
+
+            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            if (player == null)
+            {
+                return;
+            }
+
+            Rectangle hitbox = Camera.TransformRect(player.m_body.GetHitbox());
+            int direction = GetPlayerDirection(player);
+            int sequence = _dragonBallCount + 1;
+            float horizontalSpeed = 80f + (float)_random.NextDouble() * 50f;
+
+            _dragonBalls.Add(new DragonBallProjectile(
+                new Vector2(
+                    hitbox.Center.X + direction * (hitbox.Width / 2 + 8),
+                    hitbox.Center.Y - 4
+                ),
+                new Vector2(
+                    direction * horizontalSpeed,
+                    0f
+                ),
+                DragonBallLifetimeSeconds,
+                sequence,
+                sequence == 7
+            ));
+            _dragonBallCount = sequence;
+        }
+
+        private void UpdateDragonBalls(float delta)
+        {
+            for (int i = _dragonBalls.Count - 1; i >= 0; i--)
+            {
+                DragonBallProjectile ball = _dragonBalls[i];
+                ball.RemainingSeconds -= delta;
+
+                if (ball.RemainingSeconds <= 0f)
+                {
+                    bool summonsShenron = ball.SummonsShenron;
+                    _dragonBalls.RemoveAt(i);
+
+                    if (summonsShenron)
+                    {
+                        _shenronSeconds = ShenronSequenceSeconds;
+                    }
+
+                    continue;
+                }
+
+                if (!ball.HasBounced)
+                {
+                    ball.Velocity.Y = Math.Min(
+                        145f,
+                        ball.Velocity.Y + DragonBallGravity * delta
+                    );
+                }
+                MoveDragonBall(ref ball, delta);
+                _dragonBalls[i] = ball;
+            }
+
+            ResolvePlayerDragonBallCollisions();
+            ResolveDragonBallCollisions();
+        }
+
+        private void ResolvePlayerDragonBallCollisions()
+        {
+            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            if (player == null)
+            {
+                return;
+            }
+
+            Rectangle hitbox = Camera.TransformRect(player.m_body.GetHitbox());
+            for (int i = 0; i < _dragonBalls.Count; i++)
+            {
+                DragonBallProjectile ball = _dragonBalls[i];
+                if (ResolveCircleRectangleCollision(ref ball, hitbox))
+                {
+                    ball.HasBounced = true;
+                    _dragonBalls[i] = ball;
+                }
+            }
+        }
+
+        private static bool ResolveCircleRectangleCollision(
+            ref DragonBallProjectile ball,
+            Rectangle rectangle
+        )
+        {
+            float centerX = ball.ScreenPosition.X;
+            float centerY = ball.ScreenPosition.Y;
+            float closestX = Math.Max(rectangle.Left, Math.Min(rectangle.Right, centerX));
+            float closestY = Math.Max(rectangle.Top, Math.Min(rectangle.Bottom, centerY));
+            float deltaX = centerX - closestX;
+            float deltaY = centerY - closestY;
+            float distanceSquared = deltaX * deltaX + deltaY * deltaY;
+            float radiusSquared = DragonBallRadius * DragonBallRadius;
+
+            if (distanceSquared >= radiusSquared)
+            {
+                return false;
+            }
+
+            Vector2 normal;
+            float penetration;
+            if (distanceSquared > 0.0001f)
+            {
+                float distance = (float)Math.Sqrt(distanceSquared);
+                normal = new Vector2(deltaX / distance, deltaY / distance);
+                penetration = DragonBallRadius - distance;
+            }
+            else
+            {
+                float leftDistance = centerX - rectangle.Left;
+                float rightDistance = rectangle.Right - centerX;
+                float topDistance = centerY - rectangle.Top;
+                float bottomDistance = rectangle.Bottom - centerY;
+                float nearest = Math.Min(
+                    Math.Min(leftDistance, rightDistance),
+                    Math.Min(topDistance, bottomDistance)
+                );
+
+                if (nearest == leftDistance)
+                {
+                    normal = new Vector2(-1f, 0f);
+                    penetration = DragonBallRadius + leftDistance;
+                }
+                else if (nearest == rightDistance)
+                {
+                    normal = new Vector2(1f, 0f);
+                    penetration = DragonBallRadius + rightDistance;
+                }
+                else if (nearest == topDistance)
+                {
+                    normal = new Vector2(0f, -1f);
+                    penetration = DragonBallRadius + topDistance;
+                }
+                else
+                {
+                    normal = new Vector2(0f, 1f);
+                    penetration = DragonBallRadius + bottomDistance;
+                }
+            }
+
+            ball.ScreenPosition += normal * penetration;
+            float velocityAlongNormal = Vector2.Dot(ball.Velocity, normal);
+            if (velocityAlongNormal < 0f)
+            {
+                ball.Velocity -= 2f * velocityAlongNormal * normal;
+            }
+
+            return true;
+        }
+
+        private void ResolveDragonBallCollisions()
+        {
+            float minimumDistance = DragonBallRadius * 2f;
+            float minimumDistanceSquared = minimumDistance * minimumDistance;
+
+            for (int firstIndex = 0; firstIndex < _dragonBalls.Count; firstIndex++)
+            {
+                for (int secondIndex = firstIndex + 1;
+                     secondIndex < _dragonBalls.Count;
+                     secondIndex++)
+                {
+                    DragonBallProjectile first = _dragonBalls[firstIndex];
+                    DragonBallProjectile second = _dragonBalls[secondIndex];
+                    Vector2 difference = second.ScreenPosition - first.ScreenPosition;
+                    float distanceSquared = difference.LengthSquared();
+
+                    if (distanceSquared >= minimumDistanceSquared)
+                    {
+                        continue;
+                    }
+
+                    float distance = (float)Math.Sqrt(distanceSquared);
+                    Vector2 normal = distance > 0.0001f
+                        ? difference / distance
+                        : new Vector2(1f, 0f);
+                    float separation = (minimumDistance - distance) * 0.5f;
+                    first.ScreenPosition -= normal * separation;
+                    second.ScreenPosition += normal * separation;
+
+                    Vector2 relativeVelocity = second.Velocity - first.Velocity;
+                    float velocityAlongNormal = Vector2.Dot(relativeVelocity, normal);
+                    if (velocityAlongNormal < 0f)
+                    {
+                        float impulse = -velocityAlongNormal;
+                        first.Velocity -= impulse * normal;
+                        second.Velocity += impulse * normal;
+                    }
+
+                    first.HasBounced = true;
+                    second.HasBounced = true;
+                    _dragonBalls[firstIndex] = first;
+                    _dragonBalls[secondIndex] = second;
+                }
+            }
+        }
+
+        private void MoveDragonBall(ref DragonBallProjectile ball, float delta)
+        {
+            Vector2 next = ball.ScreenPosition;
+            next.X += ball.Velocity.X * delta;
+
+            if (next.X < DragonBallRadius)
+            {
+                next.X = DragonBallRadius;
+                ball.Velocity.X = Math.Abs(ball.Velocity.X);
+                ball.HasBounced = true;
+            }
+            else if (next.X > Game1.WIDTH - DragonBallRadius)
+            {
+                next.X = Game1.WIDTH - DragonBallRadius;
+                ball.Velocity.X = -Math.Abs(ball.Velocity.X);
+                ball.HasBounced = true;
+            }
+            else if (DragonBallHitsTerrain(next))
+            {
+                ball.Velocity.X = -ball.Velocity.X;
+                ball.HasBounced = true;
+                next.X = ball.ScreenPosition.X;
+            }
+
+            ball.ScreenPosition.X = next.X;
+            next.Y = ball.ScreenPosition.Y + ball.Velocity.Y * delta;
+
+            if (next.Y < DragonBallRadius)
+            {
+                next.Y = DragonBallRadius;
+                ball.Velocity.Y = Math.Abs(ball.Velocity.Y);
+                ball.HasBounced = true;
+            }
+            else if (next.Y > Game1.HEIGHT - DragonBallRadius)
+            {
+                next.Y = Game1.HEIGHT - DragonBallRadius;
+                ball.Velocity.Y = -Math.Abs(ball.Velocity.Y);
+                ball.HasBounced = true;
+            }
+            else if (DragonBallHitsTerrain(next))
+            {
+                ball.Velocity.Y = -ball.Velocity.Y;
+                ball.HasBounced = true;
+                next.Y = ball.ScreenPosition.Y;
+            }
+
+            ball.ScreenPosition.Y = next.Y;
+        }
+
+        private bool DragonBallHitsTerrain(Vector2 screenPosition)
+        {
+            int worldX = (int)(screenPosition.X - Camera.Offset.X);
+            int worldY = (int)(
+                screenPosition.Y -
+                Camera.Offset.Y -
+                Camera.CurrentScreen * Game1.HEIGHT
+            );
+            Rectangle query = new Rectangle(
+                worldX - DragonBallRadius,
+                worldY - DragonBallRadius,
+                DragonBallRadius * 2,
+                DragonBallRadius * 2
+            );
+            AdvCollisionInfo collisionInfo = LevelManager.GetCollisionInfo(query);
+            IReadOnlyList<IBlock> blocks = collisionInfo.GetCollidedBlocks();
+
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                Rectangle overlap;
+                if (blocks[i].Intersects(query, out overlap) ==
+                    BlockCollisionType.Collision_Blocking)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void UpdateShenron(float delta)
+        {
+            if (_shenronSeconds <= 0f)
+            {
+                return;
+            }
+
+            _shenronSeconds = Math.Max(0f, _shenronSeconds - delta);
+            if (_shenronSeconds <= 0f)
+            {
+                _dragonBallCount = 0;
+            }
+        }
+
+        private void DrawDragonBalls()
+        {
+            for (int i = 0; i < _dragonBalls.Count; i++)
+            {
+                DragonBallProjectile ball = _dragonBalls[i];
+                int centerX = (int)ball.ScreenPosition.X;
+                int centerY = (int)ball.ScreenPosition.Y;
+
+                DrawOrb(
+                    centerX,
+                    centerY,
+                    DragonBallRadius + 1,
+                    new Color((byte)89, (byte)38, (byte)3, (byte)190)
+                );
+                DrawOrb(
+                    centerX,
+                    centerY,
+                    DragonBallRadius,
+                    new Color((byte)239, (byte)112, (byte)7, (byte)255)
+                );
+                DrawOrb(
+                    centerX - 1,
+                    centerY - 1,
+                    4,
+                    new Color((byte)255, (byte)191, (byte)42, (byte)255)
+                );
+                DrawDragonBallStars(centerX, centerY, ball.StarCount);
+            }
+        }
+
+        private void DrawDragonBallStars(int centerX, int centerY, int count)
+        {
+            int[] selected = DragonBallStarIndexes[
+                Math.Max(1, Math.Min(7, count)) - 1
+            ];
+            Color starColor = new Color((byte)116, (byte)13, (byte)7, (byte)255);
+
+            for (int i = 0; i < selected.Length; i++)
+            {
+                Point position = DragonBallStarPositions[selected[i]];
+                Game1.spriteBatch.Draw(
+                    _pixel,
+                    new Rectangle(centerX + position.X, centerY + position.Y, 1, 1),
+                    starColor
+                );
+            }
+        }
+
+        private void DrawShenron()
+        {
+            if (_shenronTexture == null)
+            {
+                return;
+            }
+
+            float elapsed = ShenronSequenceSeconds - _shenronSeconds;
+            if (elapsed < ShenronDelaySeconds)
+            {
+                return;
+            }
+
+            float visibleElapsed = elapsed - ShenronDelaySeconds;
+            float fadeIn = Clamp01(visibleElapsed / ShenronFadeInSeconds);
+            float fadeOut = Clamp01(_shenronSeconds / ShenronFadeOutSeconds);
+            float opacity = Math.Min(fadeIn, fadeOut);
+            float pulse = 1f + (float)Math.Sin(_animationSeconds * 3.4f) * 0.018f;
+            int width = (int)(_shenronTexture.Width * pulse);
+            int height = (int)(_shenronTexture.Height * pulse);
+            int x = (Game1.WIDTH - width) / 2 + Wave(_animationSeconds * 1.7f, 211, 2);
+            int y = (Game1.HEIGHT - height) / 2 + Wave(_animationSeconds * 2.1f, 223, 3);
+            byte glowAlpha = (byte)(72f * opacity);
+            byte bodyAlpha = (byte)(255f * opacity);
+
+            Game1.spriteBatch.Draw(
+                _shenronTexture,
+                new Rectangle(x - 3, y - 3, width + 6, height + 6),
+                new Color((byte)93, (byte)255, (byte)116, glowAlpha)
+            );
+            Game1.spriteBatch.Draw(
+                _shenronTexture,
+                new Rectangle(x, y, width, height),
+                new Color((byte)255, (byte)255, (byte)255, bodyAlpha)
+            );
         }
 
         private bool GenkidamaHitsTerrain()
@@ -466,6 +948,32 @@ namespace SuperSaiyan
             for (int i = 0; i < _auraFrames.Length; i++)
             {
                 _auraFrames[i] = CreateAuraFrame(graphicsDevice, 96, 128, i);
+            }
+
+            _shenronTexture = LoadEmbeddedTexture(
+                graphicsDevice,
+                "SuperSaiyan.Assets.shenron.png"
+            );
+        }
+
+        private static Texture2D LoadEmbeddedTexture(
+            GraphicsDevice graphicsDevice,
+            string resourceName
+        )
+        {
+            Stream stream = Assembly.GetExecutingAssembly()
+                .GetManifestResourceStream(resourceName);
+            if (stream == null)
+            {
+                JumpKing.Program.crashLog.AddErrorMessage(
+                    "SuperSaiyan: missing embedded resource " + resourceName
+                );
+                return null;
+            }
+
+            using (stream)
+            {
+                return Texture2D.FromStream(graphicsDevice, stream);
             }
         }
 
@@ -622,8 +1130,9 @@ namespace SuperSaiyan
             float explosionT = Clamp01(
                 _genkidamaPhaseSeconds / GenkidamaExplosionSeconds
             );
-            int explosionRadius = GenkidamaRadius +
-                (int)(explosionT * GenkidamaDamageRadius);
+            int explosionRadius = (int)(
+                (GenkidamaRadius + explosionT * GenkidamaDamageRadius) * 0.8f
+            );
             float rayFade = 1f - Clamp01((explosionT - 0.42f) / 0.18f);
 
             for (int i = 0; i < 28; i++)
@@ -632,8 +1141,7 @@ namespace SuperSaiyan
                     DamageValue(_damageSeed, i, 109, 100) * 0.0018f;
                 int innerRadius = Math.Max(4, explosionRadius / 3);
                 int rayLength = explosionRadius +
-                    14 +
-                    DamageValue(_damageSeed, i, 113, 48);
+                    (int)((14 + DamageValue(_damageSeed, i, 113, 48)) * 0.8f);
                 int startX = centerX + (int)(Math.Cos(angle) * innerRadius);
                 int startY = centerY + (int)(Math.Sin(angle) * innerRadius);
                 int endX = centerX + (int)(Math.Cos(angle) * rayLength);
@@ -665,7 +1173,7 @@ namespace SuperSaiyan
                 DrawOrb(
                     centerX,
                     centerY,
-                    explosionRadius + 12,
+                    explosionRadius + 10,
                     new Color(
                         (byte)22,
                         (byte)78,
@@ -701,7 +1209,7 @@ namespace SuperSaiyan
             DrawDissolvingExplosion(
                 centerX,
                 centerY,
-                explosionRadius + 12,
+                explosionRadius + 10,
                 Clamp01((explosionT - 0.55f) / 0.45f)
             );
         }
@@ -1279,6 +1787,32 @@ namespace SuperSaiyan
             Charge,
             Flight,
             Explosion
+        }
+
+        private struct DragonBallProjectile
+        {
+            public Vector2 ScreenPosition;
+            public Vector2 Velocity;
+            public float RemainingSeconds;
+            public bool HasBounced;
+            public readonly int StarCount;
+            public readonly bool SummonsShenron;
+
+            public DragonBallProjectile(
+                Vector2 screenPosition,
+                Vector2 velocity,
+                float remainingSeconds,
+                int starCount,
+                bool summonsShenron
+            )
+            {
+                ScreenPosition = screenPosition;
+                Velocity = velocity;
+                RemainingSeconds = remainingSeconds;
+                HasBounced = false;
+                StarCount = starCount;
+                SummonsShenron = summonsShenron;
+            }
         }
 
         private enum DamageShape
