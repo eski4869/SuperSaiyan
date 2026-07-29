@@ -19,23 +19,184 @@ namespace SuperSaiyan
         [BeforeLevelLoad]
         public static void BeforeLevelLoad()
         {
-            SuperSaiyanAura.RegisterCommandTarget();
+            SuperSaiyanRuntime.RegisterCommandTarget();
             TargetPlayerResolver.ResolveApi();
         }
 
         [OnLevelStart]
         public static void OnLevelStart()
         {
-            SuperSaiyanAura.RegisterCommandTarget();
+            SuperSaiyanRuntime.RegisterCommandTarget();
             TargetPlayerResolver.ResolveApi();
-            SuperSaiyanAura.EnsureAdded();
+            SuperSaiyanRuntime.EnsureAdded();
         }
     }
 
-    public sealed class SuperSaiyanAura :
+    public sealed class SuperSaiyanRuntime :
         Entity,
         JumpKing.Util.IDrawable,
         JumpKing.Util.Tags.IForeground
+    {
+        private const string CommandTarget = "super_saiyan";
+        private static SuperSaiyanRuntime _instance;
+
+        private readonly List<SuperSaiyanEffect> _effects =
+            new List<SuperSaiyanEffect>();
+        private KeyboardState _previousKeyboardState;
+
+        public static void RegisterCommandTarget()
+        {
+            BrokerCommandClient.Register(CommandTarget);
+        }
+
+        public static void EnsureAdded()
+        {
+            if (EntityManager.instance == null ||
+                (_instance != null && _instance.IsAlive))
+            {
+                return;
+            }
+
+            _instance = new SuperSaiyanRuntime();
+            EntityManager.instance.AddObject(_instance);
+        }
+
+        private SuperSaiyanRuntime()
+        {
+            _previousKeyboardState = Keyboard.GetState();
+            BrokerCommandClient.Register(CommandTarget);
+        }
+
+        protected override void Update(float delta)
+        {
+            ProcessBrokerCommand();
+            ProcessKeyboard();
+
+            for (int i = _effects.Count - 1; i >= 0; i--)
+            {
+                SuperSaiyanEffect effect = _effects[i];
+                if (!effect.IsTargetAlive)
+                {
+                    effect.Dispose();
+                    _effects.RemoveAt(i);
+                    continue;
+                }
+
+                effect.Update(delta);
+            }
+        }
+
+        public override void Draw()
+        {
+            for (int i = 0; i < _effects.Count; i++)
+            {
+                _effects[i].Draw();
+            }
+        }
+
+        public void ForegroundDraw()
+        {
+            for (int i = 0; i < _effects.Count; i++)
+            {
+                _effects[i].ForegroundDraw();
+            }
+        }
+
+        protected override void OnDestroy()
+        {
+            for (int i = 0; i < _effects.Count; i++)
+            {
+                _effects[i].Dispose();
+            }
+
+            _effects.Clear();
+            if (ReferenceEquals(_instance, this))
+            {
+                _instance = null;
+            }
+        }
+
+        private void ProcessBrokerCommand()
+        {
+            IReadOnlyDictionary<string, string> parameters;
+            if (!BrokerCommandClient.TryDequeue(
+                CommandTarget,
+                out parameters
+            ))
+            {
+                return;
+            }
+
+            string command;
+            if (!parameters.TryGetValue("command", out command) ||
+                string.IsNullOrWhiteSpace(command))
+            {
+                return;
+            }
+
+            string user;
+            parameters.TryGetValue("user", out user);
+            PlayerEntity target = TargetPlayerResolver.ResolvePlayer(user);
+            if (target != null)
+            {
+                GetOrCreateEffect(target).ExecuteCommand(command);
+            }
+        }
+
+        private void ProcessKeyboard()
+        {
+            KeyboardState keyboardState = Keyboard.GetState();
+            bool shiftDown =
+                keyboardState.IsKeyDown(Keys.LeftShift) ||
+                keyboardState.IsKeyDown(Keys.RightShift);
+
+            PlayerEntity player = EntityManager.instance == null ? null :
+                EntityManager.instance.Find<PlayerEntity>();
+            if (player != null && shiftDown)
+            {
+                SuperSaiyanEffect effect = GetOrCreateEffect(player);
+                if (WasKeyPressed(keyboardState, Keys.S))
+                {
+                    effect.ExecuteCommand("activate");
+                }
+
+                if (WasKeyPressed(keyboardState, Keys.C))
+                {
+                    effect.ExecuteCommand("kamehameha");
+                }
+
+                if (WasKeyPressed(keyboardState, Keys.G))
+                {
+                    effect.ExecuteCommand("genkidama");
+                }
+            }
+
+            _previousKeyboardState = keyboardState;
+        }
+
+        private SuperSaiyanEffect GetOrCreateEffect(PlayerEntity player)
+        {
+            for (int i = 0; i < _effects.Count; i++)
+            {
+                if (_effects[i].Targets(player))
+                {
+                    return _effects[i];
+                }
+            }
+
+            var effect = new SuperSaiyanEffect(player, _effects.Count + 1);
+            _effects.Add(effect);
+            return effect;
+        }
+
+        private bool WasKeyPressed(KeyboardState keyboardState, Keys key)
+        {
+            return keyboardState.IsKeyDown(key) &&
+                !_previousKeyboardState.IsKeyDown(key);
+        }
+    }
+
+    internal sealed class SuperSaiyanEffect
     {
         private const float AuraDurationSeconds = 20f;
         private const float KamehamehaChargeSeconds = 1f;
@@ -64,16 +225,12 @@ namespace SuperSaiyan
             ShenronVisibleSeconds +
             ShenronFadeOutSeconds;
         private const int DragonBallRadius = 6;
-        private const string CommandTarget = "super_saiyan";
         private const string ActivateCommand = "activate";
         private const string KamehamehaCommand = "kamehameha";
         private const string GenkidamaCommand = "genkidama";
         private const string DragonBallCommand = "dragon-ball";
         private const string DeactivateCommand = "deactivate";
 
-        private const int MaximumPlayers = 4;
-        private static readonly SuperSaiyanAura[] Instances =
-            new SuperSaiyanAura[MaximumPlayers];
         private static readonly FieldInfo PlayerFlipField = typeof(PlayerEntity).GetField(
             "m_flip",
             BindingFlags.Instance | BindingFlags.NonPublic
@@ -102,7 +259,6 @@ namespace SuperSaiyan
         private Texture2D[] _auraFrames;
         private Texture2D _pixel;
         private Texture2D _shenronTexture;
-        private KeyboardState _previousKeyboardState;
         private float _remainingSeconds;
         private float _kamehamehaSeconds;
         private float _animationSeconds;
@@ -123,80 +279,31 @@ namespace SuperSaiyan
             new List<DragonBallProjectile>();
         private int _dragonBallCount;
         private float _shenronSeconds;
-        private readonly int _playerNumber;
+        private readonly PlayerEntity _targetPlayer;
 
-        public static void RegisterCommandTarget()
+        public bool IsTargetAlive
         {
-            BrokerCommandClient.Register(CommandTarget);
+            get { return _targetPlayer != null && _targetPlayer.IsAlive; }
         }
 
-        public static void EnsureAdded()
+        public SuperSaiyanEffect(PlayerEntity targetPlayer, int seedOffset)
         {
-            if (EntityManager.instance == null)
-            {
-                return;
-            }
-
-            for (int playerNumber = 1; playerNumber <= MaximumPlayers; playerNumber++)
-            {
-                int index = playerNumber - 1;
-                if (Instances[index] != null && Instances[index].IsAlive)
-                {
-                    continue;
-                }
-
-                Instances[index] = new SuperSaiyanAura(playerNumber);
-                EntityManager.instance.AddObject(Instances[index]);
-            }
+            _targetPlayer = targetPlayer;
+            _random = new Random(unchecked(Environment.TickCount + seedOffset * 397));
         }
 
-        private SuperSaiyanAura(int playerNumber)
+        public bool Targets(PlayerEntity player)
         {
-            _playerNumber = playerNumber;
-            _random = new Random(unchecked(Environment.TickCount + playerNumber * 397));
-            _previousKeyboardState = Keyboard.GetState();
-            if (playerNumber == 1)
-            {
-                BrokerCommandClient.Register(CommandTarget);
-            }
+            return ReferenceEquals(_targetPlayer, player);
         }
 
-        protected override void Update(float delta)
+        public void Update(float delta)
         {
             _animationSeconds += delta;
             UpdateDamageScreen();
 
             PlayerEntity player = GetTargetPlayer();
             TrackHorizontalDirection(player);
-
-            if (_playerNumber == 1)
-            {
-                KeyboardState keyboardState = Keyboard.GetState();
-                ProcessBrokerCommands();
-
-                bool shiftDown =
-                    keyboardState.IsKeyDown(Keys.LeftShift) ||
-                    keyboardState.IsKeyDown(Keys.RightShift);
-
-                if (shiftDown && WasKeyPressed(keyboardState, Keys.S))
-                {
-                    ActivateAura();
-                }
-
-                if (shiftDown && WasKeyPressed(keyboardState, Keys.C))
-                {
-                    FireKamehameha();
-                }
-
-                if (shiftDown && WasKeyPressed(keyboardState, Keys.G))
-                {
-                    StartGenkidama();
-                }
-
-                _previousKeyboardState = keyboardState;
-            }
-
-
 
             if (_remainingSeconds > 0f)
             {
@@ -214,9 +321,9 @@ namespace SuperSaiyan
             UpdateShenron(delta);
         }
 
-        public override void Draw()
+        public void Draw()
         {
-            if (!TargetPlayerResolver.IsPlayerInCurrentView(_playerNumber))
+            if (!TargetPlayerResolver.IsPlayerInCurrentView(_targetPlayer))
             {
                 return;
             }
@@ -257,7 +364,7 @@ namespace SuperSaiyan
 
         public void ForegroundDraw()
         {
-            if (!TargetPlayerResolver.IsPlayerInCurrentView(_playerNumber))
+            if (!TargetPlayerResolver.IsPlayerInCurrentView(_targetPlayer))
             {
                 return;
             }
@@ -307,7 +414,7 @@ namespace SuperSaiyan
             }
         }
 
-        protected override void OnDestroy()
+        public void Dispose()
         {
             if (_auraFrames != null)
             {
@@ -335,12 +442,6 @@ namespace SuperSaiyan
             _pixel = null;
             _shenronTexture = null;
 
-            int index = _playerNumber - 1;
-            if (index >= 0 && index < Instances.Length &&
-                ReferenceEquals(Instances[index], this))
-            {
-                Instances[index] = null;
-            }
         }
 
         private void ActivateAura()
@@ -368,40 +469,7 @@ namespace SuperSaiyan
             _damageSeed = (_damageSeed + 1) % 997;
         }
 
-        private void ProcessBrokerCommands()
-        {
-            BrokerCommandClient.Register(CommandTarget);
-
-            string user;
-            string command;
-            if (!BrokerCommandClient.TryDequeue(
-                CommandTarget,
-                out user,
-                out command
-            ))
-            {
-                return;
-            }
-
-            int mask = TargetPlayerResolver.ResolvePlayerMask(user);
-            for (int playerNumber = 1;
-                playerNumber <= MaximumPlayers;
-                playerNumber++)
-            {
-                if ((mask & (1 << (playerNumber - 1))) == 0)
-                {
-                    continue;
-                }
-
-                SuperSaiyanAura target = Instances[playerNumber - 1];
-                if (target != null && target.IsAlive)
-                {
-                    target.ExecuteCommand(command);
-                }
-            }
-        }
-
-        private void ExecuteCommand(string command)
+        public void ExecuteCommand(string command)
         {
             if (string.Equals(command, ActivateCommand, StringComparison.OrdinalIgnoreCase))
             {
@@ -1029,7 +1097,7 @@ namespace SuperSaiyan
 
         private PlayerEntity GetTargetPlayer()
         {
-            return TargetPlayerResolver.GetPlayer(_playerNumber);
+            return _targetPlayer;
         }
 
         private static int GetPlayerScreenIndex(PlayerEntity player)
@@ -2312,11 +2380,6 @@ namespace SuperSaiyan
             return (int)(Math.Sin(time + index * 1.31f) * amount);
         }
 
-        private bool WasKeyPressed(KeyboardState keyboardState, Keys key)
-        {
-            return keyboardState.IsKeyDown(key) &&
-                !_previousKeyboardState.IsKeyDown(key);
-        }
     }
     internal static class BrokerCommandClient
     {
@@ -2325,7 +2388,7 @@ namespace SuperSaiyan
         private static object _registry;
         private static MethodInfo _registerMethod;
         private static MethodInfo _tryDequeueMethod;
-        private static DateTime _nextResolveUtc = DateTime.MinValue;
+        private static int _lastResolveAssemblyCount = -1;
         private static bool _loggedMissingBroker;
         private static bool _registered;
 
@@ -2356,12 +2419,10 @@ namespace SuperSaiyan
 
         public static bool TryDequeue(
             string target,
-            out string user,
-            out string command
+            out IReadOnlyDictionary<string, string> parameters
         )
         {
-            user = null;
-            command = null;
+            parameters = null;
 
             if (!_registered)
             {
@@ -2375,10 +2436,9 @@ namespace SuperSaiyan
 
             try
             {
-                object[] args = new object[] { target, null, null };
+                object[] args = new object[] { target, null };
                 bool dequeued = (bool)_tryDequeueMethod.Invoke(_registry, args);
-                user = args[1] as string;
-                command = args[2] as string;
+                parameters = args[1] as IReadOnlyDictionary<string, string>;
                 return dequeued;
             }
             catch (Exception ex)
@@ -2397,15 +2457,13 @@ namespace SuperSaiyan
                 return true;
             }
 
-            DateTime nowUtc = DateTime.UtcNow;
-            if (nowUtc < _nextResolveUtc)
+            Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            if (_lastResolveAssemblyCount == assemblies.Length)
             {
                 return false;
             }
 
-            _nextResolveUtc = nowUtc.AddSeconds(1);
-
-            Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            _lastResolveAssemblyCount = assemblies.Length;
             for (int i = 0; i < assemblies.Length; i++)
             {
                 Type registryType = assemblies[i].GetType(RegistryTypeName, false);
@@ -2427,8 +2485,7 @@ namespace SuperSaiyan
                     new Type[]
                     {
                         typeof(string),
-                        typeof(string).MakeByRefType(),
-                        typeof(string).MakeByRefType()
+                        typeof(IReadOnlyDictionary<string, string>).MakeByRefType()
                     }
                 );
 

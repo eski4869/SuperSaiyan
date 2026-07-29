@@ -20,5 +20,5 @@ Supported commands:
 ## Local multiplayer integration
 
 When Local Multiplayer Mod is installed, the Broker request's optional `user`
-selects one or more players. Each player has independent effect state. Without
+selects one player. Each player has independent effect state. Without
 Local Multiplayer Mod, commands keep their normal Player 1 behavior.
