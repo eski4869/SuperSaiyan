@@ -20,12 +20,14 @@ namespace SuperSaiyan
         public static void BeforeLevelLoad()
         {
             SuperSaiyanAura.RegisterCommandTarget();
+            TargetPlayerResolver.ResolveApi();
         }
 
         [OnLevelStart]
         public static void OnLevelStart()
         {
             SuperSaiyanAura.RegisterCommandTarget();
+            TargetPlayerResolver.ResolveApi();
             SuperSaiyanAura.EnsureAdded();
         }
     }
@@ -69,7 +71,9 @@ namespace SuperSaiyan
         private const string DragonBallCommand = "dragon-ball";
         private const string DeactivateCommand = "deactivate";
 
-        private static SuperSaiyanAura _instance;
+        private const int MaximumPlayers = 4;
+        private static readonly SuperSaiyanAura[] Instances =
+            new SuperSaiyanAura[MaximumPlayers];
         private static readonly FieldInfo PlayerFlipField = typeof(PlayerEntity).GetField(
             "m_flip",
             BindingFlags.Instance | BindingFlags.NonPublic
@@ -113,12 +117,13 @@ namespace SuperSaiyan
         private int _genkidamaDirection = 1;
         private bool _genkidamaArmed;
         private int _lastHorizontalDirection = 1;
-        private readonly Random _random = new Random();
+        private readonly Random _random;
         private readonly List<DamageMark> _damageMarks = new List<DamageMark>();
         private readonly List<DragonBallProjectile> _dragonBalls =
             new List<DragonBallProjectile>();
         private int _dragonBallCount;
         private float _shenronSeconds;
+        private readonly int _playerNumber;
 
         public static void RegisterCommandTarget()
         {
@@ -132,20 +137,28 @@ namespace SuperSaiyan
                 return;
             }
 
-            if (_instance != null && _instance.IsAlive)
+            for (int playerNumber = 1; playerNumber <= MaximumPlayers; playerNumber++)
             {
-                return;
-            }
+                int index = playerNumber - 1;
+                if (Instances[index] != null && Instances[index].IsAlive)
+                {
+                    continue;
+                }
 
-            _instance = new SuperSaiyanAura();
-            EntityManager.instance.AddObject(_instance);
+                Instances[index] = new SuperSaiyanAura(playerNumber);
+                EntityManager.instance.AddObject(Instances[index]);
+            }
         }
 
-        private SuperSaiyanAura()
+        private SuperSaiyanAura(int playerNumber)
         {
+            _playerNumber = playerNumber;
+            _random = new Random(unchecked(Environment.TickCount + playerNumber * 397));
             _previousKeyboardState = Keyboard.GetState();
-            BrokerCommandClient.Register(CommandTarget);
-            CreateTextures();
+            if (playerNumber == 1)
+            {
+                BrokerCommandClient.Register(CommandTarget);
+            }
         }
 
         protected override void Update(float delta)
@@ -153,30 +166,35 @@ namespace SuperSaiyan
             _animationSeconds += delta;
             UpdateDamageScreen();
 
-            KeyboardState keyboardState = Keyboard.GetState();
-            TrackHorizontalDirection(keyboardState);
-            ProcessBrokerCommands();
+            PlayerEntity player = GetTargetPlayer();
+            TrackHorizontalDirection(player);
 
-            bool shiftDown =
-                keyboardState.IsKeyDown(Keys.LeftShift) ||
-                keyboardState.IsKeyDown(Keys.RightShift);
-
-            if (shiftDown && WasKeyPressed(keyboardState, Keys.S))
+            if (_playerNumber == 1)
             {
-                ActivateAura();
-            }
+                KeyboardState keyboardState = Keyboard.GetState();
+                ProcessBrokerCommands();
 
-            if (shiftDown && WasKeyPressed(keyboardState, Keys.C))
-            {
-                FireKamehameha();
-            }
+                bool shiftDown =
+                    keyboardState.IsKeyDown(Keys.LeftShift) ||
+                    keyboardState.IsKeyDown(Keys.RightShift);
 
-            if (shiftDown && WasKeyPressed(keyboardState, Keys.G))
-            {
-                StartGenkidama();
-            }
+                if (shiftDown && WasKeyPressed(keyboardState, Keys.S))
+                {
+                    ActivateAura();
+                }
 
-            _previousKeyboardState = keyboardState;
+                if (shiftDown && WasKeyPressed(keyboardState, Keys.C))
+                {
+                    FireKamehameha();
+                }
+
+                if (shiftDown && WasKeyPressed(keyboardState, Keys.G))
+                {
+                    StartGenkidama();
+                }
+
+                _previousKeyboardState = keyboardState;
+            }
 
 
 
@@ -198,6 +216,11 @@ namespace SuperSaiyan
 
         public override void Draw()
         {
+            if (!TargetPlayerResolver.IsPlayerInCurrentView(_playerNumber))
+            {
+                return;
+            }
+
             if ((_remainingSeconds <= 0f &&
                  _kamehamehaSeconds <= 0f &&
                  _genkidamaPhase == GenkidamaPhase.None) ||
@@ -218,7 +241,7 @@ namespace SuperSaiyan
                 return;
             }
 
-            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            PlayerEntity player = GetTargetPlayer();
             if (player != null)
             {
                 Rectangle hitbox = Camera.TransformRect(player.m_body.GetHitbox());
@@ -234,6 +257,11 @@ namespace SuperSaiyan
 
         public void ForegroundDraw()
         {
+            if (!TargetPlayerResolver.IsPlayerInCurrentView(_playerNumber))
+            {
+                return;
+            }
+
             if (_pixel == null || Game1.instance == null)
             {
                 return;
@@ -247,7 +275,7 @@ namespace SuperSaiyan
             if (_kamehamehaSeconds > 0f ||
                 _genkidamaPhase == GenkidamaPhase.Charge)
             {
-                PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+                PlayerEntity player = GetTargetPlayer();
                 if (player != null)
                 {
                     Rectangle hitbox =
@@ -307,19 +335,23 @@ namespace SuperSaiyan
             _pixel = null;
             _shenronTexture = null;
 
-            if (ReferenceEquals(_instance, this))
+            int index = _playerNumber - 1;
+            if (index >= 0 && index < Instances.Length &&
+                ReferenceEquals(Instances[index], this))
             {
-                _instance = null;
+                Instances[index] = null;
             }
         }
 
         private void ActivateAura()
         {
+            EnsureTextures();
             _remainingSeconds = AuraDurationSeconds;
         }
 
         private void FireKamehameha()
         {
+            EnsureTextures();
             _kamehamehaSeconds = KamehamehaDurationSeconds;
             _damageSeed = (_damageSeed + 1) % 997;
             _lastRightDamageOrigin = null;
@@ -329,6 +361,7 @@ namespace SuperSaiyan
 
         private void StartGenkidama()
         {
+            EnsureTextures();
             _genkidamaPhase = GenkidamaPhase.Charge;
             _genkidamaPhaseSeconds = 0f;
             _genkidamaArmed = false;
@@ -339,44 +372,71 @@ namespace SuperSaiyan
         {
             BrokerCommandClient.Register(CommandTarget);
 
+            string user;
             string command;
-            while (BrokerCommandClient.TryDequeue(CommandTarget, out command))
+            if (!BrokerCommandClient.TryDequeue(
+                CommandTarget,
+                out user,
+                out command
+            ))
             {
-                if (string.Equals(command, ActivateCommand, StringComparison.OrdinalIgnoreCase))
+                return;
+            }
+
+            int mask = TargetPlayerResolver.ResolvePlayerMask(user);
+            for (int playerNumber = 1;
+                playerNumber <= MaximumPlayers;
+                playerNumber++)
+            {
+                if ((mask & (1 << (playerNumber - 1))) == 0)
                 {
-                    ActivateAura();
                     continue;
                 }
 
-                if (string.Equals(command, KamehamehaCommand, StringComparison.OrdinalIgnoreCase))
+                SuperSaiyanAura target = Instances[playerNumber - 1];
+                if (target != null && target.IsAlive)
                 {
-                    FireKamehameha();
-                    continue;
+                    target.ExecuteCommand(command);
                 }
+            }
+        }
 
-                if (string.Equals(command, GenkidamaCommand, StringComparison.OrdinalIgnoreCase))
-                {
-                    StartGenkidama();
-                    continue;
-                }
+        private void ExecuteCommand(string command)
+        {
+            if (string.Equals(command, ActivateCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                ActivateAura();
+                return;
+            }
 
-                if (string.Equals(command, DragonBallCommand, StringComparison.OrdinalIgnoreCase))
-                {
-                    FireDragonBall();
-                    continue;
-                }
+            if (string.Equals(command, KamehamehaCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                FireKamehameha();
+                return;
+            }
 
-                if (string.Equals(command, DeactivateCommand, StringComparison.OrdinalIgnoreCase))
-                {
-                    _remainingSeconds = 0f;
-                    _kamehamehaSeconds = 0f;
-                    _genkidamaPhase = GenkidamaPhase.None;
-                    _genkidamaPhaseSeconds = 0f;
-                    _genkidamaArmed = false;
-                    _dragonBalls.Clear();
-                    _dragonBallCount = 0;
-                    _shenronSeconds = 0f;
-                }
+            if (string.Equals(command, GenkidamaCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                StartGenkidama();
+                return;
+            }
+
+            if (string.Equals(command, DragonBallCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                FireDragonBall();
+                return;
+            }
+
+            if (string.Equals(command, DeactivateCommand, StringComparison.OrdinalIgnoreCase))
+            {
+                _remainingSeconds = 0f;
+                _kamehamehaSeconds = 0f;
+                _genkidamaPhase = GenkidamaPhase.None;
+                _genkidamaPhaseSeconds = 0f;
+                _genkidamaArmed = false;
+                _dragonBalls.Clear();
+                _dragonBallCount = 0;
+                _shenronSeconds = 0f;
             }
         }
 
@@ -391,7 +451,7 @@ namespace SuperSaiyan
 
             if (_genkidamaPhase == GenkidamaPhase.Charge)
             {
-                PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+                PlayerEntity player = GetTargetPlayer();
                 if (player == null ||
                     _genkidamaPhaseSeconds < GenkidamaChargeSeconds)
                 {
@@ -439,7 +499,7 @@ namespace SuperSaiyan
 
         private bool GenkidamaIsClearOfPlayer()
         {
-            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            PlayerEntity player = GetTargetPlayer();
             if (player == null)
             {
                 return false;
@@ -463,12 +523,13 @@ namespace SuperSaiyan
 
         private void FireDragonBall()
         {
+            EnsureTextures();
             if (_dragonBallCount >= 7)
             {
                 return;
             }
 
-            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            PlayerEntity player = GetTargetPlayer();
             if (player == null)
             {
                 return;
@@ -532,7 +593,7 @@ namespace SuperSaiyan
 
         private void ResolvePlayerDragonBallCollisions()
         {
-            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
+            PlayerEntity player = GetTargetPlayer();
             if (player == null)
             {
                 return;
@@ -956,6 +1017,34 @@ namespace SuperSaiyan
             );
         }
 
+        private void EnsureTextures()
+        {
+            if (_pixel != null || Game1.instance == null)
+            {
+                return;
+            }
+
+            CreateTextures();
+        }
+
+        private PlayerEntity GetTargetPlayer()
+        {
+            return TargetPlayerResolver.GetPlayer(_playerNumber);
+        }
+
+        private static int GetPlayerScreenIndex(PlayerEntity player)
+        {
+            if (player == null)
+            {
+                return -1;
+            }
+
+            int screen = -(int)Math.Floor(
+                player.m_body.GetHitbox().Center.Y / (float)Game1.HEIGHT
+            );
+            return Math.Max(0, Math.Min(LevelManager.TotalScreens - 1, screen));
+        }
+
         private static Texture2D LoadEmbeddedTexture(
             GraphicsDevice graphicsDevice,
             string resourceName
@@ -1299,8 +1388,8 @@ namespace SuperSaiyan
 
         private void UpdateDamageScreen()
         {
-            LevelScreen screen = LevelManager.CurrentScreen;
-            int screenIndex = screen == null ? -1 : screen.GetIndex0();
+            PlayerEntity player = GetTargetPlayer();
+            int screenIndex = GetPlayerScreenIndex(player);
 
             if (screenIndex == _damageScreenIndex)
             {
@@ -1322,9 +1411,8 @@ namespace SuperSaiyan
                 return;
             }
 
-            PlayerEntity player = EntityManager.instance.Find<PlayerEntity>();
-            LevelScreen screen = LevelManager.CurrentScreen;
-            if (screen == null || player == null)
+            PlayerEntity player = GetTargetPlayer();
+            if (player == null)
             {
                 return;
             }
@@ -1950,14 +2038,19 @@ namespace SuperSaiyan
             }
         }
 
-        private void TrackHorizontalDirection(KeyboardState keyboardState)
+        private void TrackHorizontalDirection(PlayerEntity player)
         {
-            if (keyboardState.IsKeyDown(Keys.Left) || keyboardState.IsKeyDown(Keys.J))
+            if (player == null)
+            {
+                return;
+            }
+
+            if (player.m_body.Velocity.X < 0f)
             {
                 _lastHorizontalDirection = -1;
             }
 
-            if (keyboardState.IsKeyDown(Keys.Right) || keyboardState.IsKeyDown(Keys.K))
+            if (player.m_body.Velocity.X > 0f)
             {
                 _lastHorizontalDirection = 1;
             }
@@ -2261,8 +2354,13 @@ namespace SuperSaiyan
             }
         }
 
-        public static bool TryDequeue(string target, out string command)
+        public static bool TryDequeue(
+            string target,
+            out string user,
+            out string command
+        )
         {
+            user = null;
             command = null;
 
             if (!_registered)
@@ -2277,9 +2375,10 @@ namespace SuperSaiyan
 
             try
             {
-                object[] args = new object[] { target, null };
+                object[] args = new object[] { target, null, null };
                 bool dequeued = (bool)_tryDequeueMethod.Invoke(_registry, args);
-                command = args[1] as string;
+                user = args[1] as string;
+                command = args[2] as string;
                 return dequeued;
             }
             catch (Exception ex)
@@ -2325,7 +2424,12 @@ namespace SuperSaiyan
                 );
                 MethodInfo tryDequeueMethod = registryType.GetMethod(
                     "TryDequeue",
-                    new Type[] { typeof(string), typeof(string).MakeByRefType() }
+                    new Type[]
+                    {
+                        typeof(string),
+                        typeof(string).MakeByRefType(),
+                        typeof(string).MakeByRefType()
+                    }
                 );
 
                 if (instanceField == null || registerMethod == null || tryDequeueMethod == null)
