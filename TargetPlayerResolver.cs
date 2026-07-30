@@ -10,24 +10,27 @@ namespace SuperSaiyan
         private const string ApiTypeName =
             "LocalMultiplayerMod.LocalMultiplayerApi";
 
-        private delegate int ResolvePlayerMaskDelegate(string user);
-        private delegate PlayerEntity GetPlayerDelegate(int playerNumber);
-        private delegate int GetCurrentViewPlayerMaskDelegate();
+        private delegate PlayerEntity ResolvePlayerDelegate(string user);
+        private delegate bool IsPlayerInCurrentViewDelegate(PlayerEntity player);
 
-        private static bool _resolved;
-        private static ResolvePlayerMaskDelegate _resolvePlayerMask;
-        private static GetPlayerDelegate _getPlayer;
-        private static GetCurrentViewPlayerMaskDelegate _getCurrentViewPlayerMask;
+        private static int _lastResolveAssemblyCount = -1;
+        private static ResolvePlayerDelegate _resolvePlayer;
+        private static IsPlayerInCurrentViewDelegate _isPlayerInCurrentView;
 
         public static void ResolveApi()
         {
-            if (_resolved)
+            if (_resolvePlayer != null && _isPlayerInCurrentView != null)
             {
                 return;
             }
 
-            _resolved = true;
             Assembly[] assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            if (_lastResolveAssemblyCount == assemblies.Length)
+            {
+                return;
+            }
+
+            _lastResolveAssemblyCount = assemblies.Length;
             for (int i = 0; i < assemblies.Length; i++)
             {
                 Type apiType = assemblies[i].GetType(ApiTypeName, false);
@@ -36,44 +39,42 @@ namespace SuperSaiyan
                     continue;
                 }
 
-                _resolvePlayerMask = CreateDelegate<ResolvePlayerMaskDelegate>(
+                _resolvePlayer = CreateDelegate<ResolvePlayerDelegate>(
                     apiType,
-                    "ResolvePlayerMask"
+                    "ResolvePlayer"
                 );
-                _getPlayer = CreateDelegate<GetPlayerDelegate>(apiType, "GetPlayer");
-                _getCurrentViewPlayerMask =
-                    CreateDelegate<GetCurrentViewPlayerMaskDelegate>(
+                _isPlayerInCurrentView =
+                    CreateDelegate<IsPlayerInCurrentViewDelegate>(
                         apiType,
-                        "GetCurrentViewPlayerMask"
+                        "IsPlayerInCurrentView"
                     );
                 return;
             }
         }
 
-        public static int ResolvePlayerMask(string user)
+        public static PlayerEntity ResolvePlayer(string user)
         {
             ResolveApi();
-            return _resolvePlayerMask == null ? 1 : _resolvePlayerMask(user);
-        }
-
-        public static PlayerEntity GetPlayer(int playerNumber)
-        {
-            ResolveApi();
-            if (_getPlayer != null)
+            if (_resolvePlayer != null)
             {
-                return _getPlayer(playerNumber);
+                return _resolvePlayer(user);
             }
 
-            return playerNumber == 1 && EntityManager.instance != null ?
-                EntityManager.instance.Find<PlayerEntity>() : null;
+            return EntityManager.instance == null ? null :
+                EntityManager.instance.Find<PlayerEntity>();
         }
 
-        public static bool IsPlayerInCurrentView(int playerNumber)
+        public static bool IsPlayerInCurrentView(PlayerEntity player)
         {
             ResolveApi();
-            int mask = _getCurrentViewPlayerMask == null ? 1 :
-                _getCurrentViewPlayerMask();
-            return (mask & (1 << (playerNumber - 1))) != 0;
+            if (_isPlayerInCurrentView != null)
+            {
+                return _isPlayerInCurrentView(player);
+            }
+
+            PlayerEntity primary = EntityManager.instance == null ? null :
+                EntityManager.instance.Find<PlayerEntity>();
+            return player != null && ReferenceEquals(player, primary);
         }
 
         private static T CreateDelegate<T>(Type apiType, string methodName)
